@@ -1,5 +1,6 @@
 import rclpy
 from rclpy.node import Node
+from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
 
 
 class MyNode(Node):
@@ -16,9 +17,15 @@ class MyNode(Node):
             ]
         )
 
+
+        self.create_subscription(PoseWithCovarianceStamped, '/ball_position_relative_filtered', self._pose_callback, 10);
+
         # Create timer
         self.timer = self.create_timer(0.5, self.timer_callback)
         self.get_logger().info("Node initialized successfully.")
+
+    def _pose_callback(self, msg: PoseWithCovarianceStamped) -> None:
+        self._pose = msg
 
     def timer_callback(self):
         # This method will be called every 0.5 seconds
