@@ -26,11 +26,11 @@ class MyNode(Node):
                     rclpy.Parameter.Type.BOOL,
                     True,
                 ),
-               rclpy.parameter.Parameter(
+                rclpy.parameter.Parameter(
                     "demo",
                     rclpy.Parameter.Type.BOOL,
                     True,
-                )
+                ),
             ]
         )
 
@@ -67,9 +67,14 @@ class MyNode(Node):
         )
         # Nur fuer die Statusanzeige, direkt an deren Callbacks
         self.create_subscription(GameState, "gamestate", display.on_gamestate, 1)
-        self.create_subscription(RobotControlState, "robot_state", display.on_robot_state, 1)
         self.create_subscription(
-            PoseWithCovarianceStamped, "ball_position_relative_filtered", display.on_ball, 1
+            RobotControlState, "robot_state", display.on_robot_state, 1
+        )
+        self.create_subscription(
+            PoseWithCovarianceStamped,
+            "ball_position_relative_filtered",
+            display.on_ball,
+            1,
         )
         self.create_subscription(Imu, "imu/data", display.on_imu, 1)
         self.create_subscription(Workload, "system_workload", display.on_workload, 1)
@@ -84,29 +89,24 @@ class MyNode(Node):
         self.status_display.source.on_pose(msg)
 
     def camera_info_callback(self, msg: CameraInfo):
-        self.get_logger().info(f'{msg=}')
         self.camera_info = msg
         self.status_display.source.on_camera_info(msg)
 
     def strategy_cb(self, msg: Strategy):
-        self.get_logger().info(f'{msg=}')
         self.strategy = msg
         self.status_display.source.on_strategy(msg)
 
     def joint_state_cb(self, msg: JointState):
-        self.get_logger().info(f'{msg=}')
         self.joints = msg
         self.status_display.source.on_joint_states(msg)
 
     def voltage_cb(self, msg: Float32):
-        self.get_logger().info(f'{msg=}')
         """Receives data sent by the battery management system."""
         self.battery_voltage = msg.data
         self.status_display.source.on_battery(msg)
 
     def diag_cb(self, msg: DiagnosticArray):
         """Updates the diagnostic state."""
-        self.get_logger().info(f'{msg=}')
         self.status_display.source.on_diagnostics(msg)
         status: DiagnosticStatus
         for status in msg.status:
@@ -131,7 +131,6 @@ class MyNode(Node):
     def timer_callback(self):
 
         self.get_logger().info("Timer callback executed.")
-
 
 
 def main(args=None):
