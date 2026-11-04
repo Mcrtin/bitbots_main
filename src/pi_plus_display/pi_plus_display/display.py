@@ -13,16 +13,15 @@ class MyNode(Node):
     def __init__(self):
         super().__init__("my_node")
         self.get_logger().info("Activate sim time")
+        self.declare_parameter("demo", True)
         self.set_parameters(
             [
                 rclpy.parameter.Parameter(
                     "use_sim_time",
                     rclpy.Parameter.Type.BOOL,
                     True,
-                )
-            ]
-            [
-                rclpy.parameter.Parameter(
+                ),
+               rclpy.parameter.Parameter(
                     "demo",
                     rclpy.Parameter.Type.BOOL,
                     True,
@@ -61,12 +60,15 @@ class MyNode(Node):
         self.pose = msg.pose
 
     def camera_info_callback(self, msg: CameraInfo):
+        self.get_logger().info(f'{msg=}')
         self.camera_info = msg
 
     def strategy_cb(self, msg: Strategy):
+        self.get_logger().info(f'{msg=}')
         self.strategy = msg
 
     def joint_state_cb(self, msg: JointState):
+        self.get_logger().info(f'{msg=}')
         self.joints = msg
 
     def voltage_cb(self, msg: Float32):
@@ -76,6 +78,7 @@ class MyNode(Node):
 
     def diag_cb(self, msg: DiagnosticArray):
         """Updates the diagnostic state."""
+        self.get_logger().info(f'{msg=}')
         status: DiagnosticStatus
         for status in msg.status:
             if "/Servos/" in status.name:
