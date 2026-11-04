@@ -8,6 +8,7 @@ from pi_plus_display.app import DisplayApp, _display_values
 from pi_plus_display.local_hardware import LocalHardware
 from pi_plus_display.pages import STATUS_PAGES, render_status
 from pi_plus_display.ros_source import RosStatusSource
+from pi_plus_display.widgets import W
 
 HW_PAGES = ["akku", "rechner", "temperatur", "netz_io"]
 
@@ -112,3 +113,14 @@ def test_hardware_pages_render_without_data():
     for name in HW_PAGES:
         img = render_status(s, names.index(name))
         assert img.size == (128, 64) and img.getbbox() is not None
+
+
+# Bei 2,5 % Last (Leerlauf auf einem Laptop) muss der CPU-Verlauf deutlich ueber der Grundlinie liegen
+def test_cpu_graph_visible_at_low_load():
+    from pi_plus_display.state import RobotState
+
+    s = RobotState()
+    s.cpu_history = [2.5] * 30
+    img = render_status(s, [n for n, _ in STATUS_PAGES].index("rechner"))
+    column = [img.getpixel((W - 1, y)) for y in range(22, 42)]
+    assert sum(1 for p in column if p) >= 4  # mindestens 4 px hoch

@@ -1,16 +1,29 @@
 # Die einzelnen Bildschirmseiten. Jede Seite ist eine Funktion
 # (draw, state, **kw) -> None und zeichnet auf ein 128x64-Bild im Modus "1".
+# Gruppen: Statusseiten, Hardware-Seiten, Graph-Seiten fuers Debugging, danach Sonderseiten (Menue, Alarm, Start).
+# Welche Statusseiten in welcher Reihenfolge erscheinen, steht in STATUS_PAGES.
 # Bedienung per 5-Wege-Joystick:
 #     links/rechts  vorige/naechste Statusseite
 #     Mitte         Menue oeffnen, im Menue: auswaehlen
 #     hoch/runter   im Menue blaettern
 #     Alarm         erscheint automatisch, Mitte = quittieren
 
+import math
+
 from PIL import Image, ImageDraw
 
-from .graph_pages import page_field, page_load, page_load_history, page_topics
-from .hardware_pages import page_battery, page_computer, page_net_io, page_temperatures
+from .state import TempSensor
 from .widgets import BIG, NORMAL, SMALL, H, W, bar, header, label_value, page_dots, status_tag, text_center, text_right
+
+# Spielfeld HSL KidSize in Metern (Laenge x Breite), Mittelkreis-Radius
+FIELD_L, FIELD_W, CIRCLE_R = 9.0, 6.0, 0.75
+# Grenze fuer Drehmoment-Ueberlast in livelybot_serial (diagnostics.torque_overload_threshold)
+OVERLOAD_NM = 10.0
+LOAD_SCALE_NM = 15.0
+TEMP_MIN_C, TEMP_MAX_C = 20.0, 100.0  # Bereich der Temperaturbalken
+TEMP_HOT_C = 80.0  # ab hier wird die Zeile invertiert
+BATTERY_STALE_S = 3.0
+ROWS = 5  # Zeilen auf den Listenseiten
 
 
 # Akkuspannung oder "--.-V", wenn noch keine Nachricht kam
@@ -18,9 +31,9 @@ def volt(v):
     return "--.-V" if v is None else f"{v:.1f}V"
 
 
-# Zahl oder "--", wenn der Wert noch unbekannt ist
-def _num(v):
-    return "--" if v is None else f"{v}"
+# Zahl oder "--", wenn der Wert noch unbekannt ist; fmt z. B. "{:.1f} A"
+def _num(v, fmt="{:.0f}"):
+    return "--" if v is None else fmt.format(v)
 
 
 def _pct(v):
@@ -34,6 +47,50 @@ def _mmss(seconds):
 
 def _who(state):
     return f"{state.robot_name} #{state.player_number}"
+
+
+# Gestrichelte waagrechte Linie
+def _dashed(draw, x0, x1, y, fill=1, step=3):
+    for x in range(x0, x1 + 1, step):
+        draw.point((x, y), fill=fill)
+
+
+# Verlauf als Flaeche, neuester Wert rechts; lo..hi wird auf die Hoehe top..bottom abgebildet
+def _area(draw, values, x0, x1, top, bottom, lo, hi):
+    span = max(hi - lo, 1e-9)
+    for i, v in enumerate(reversed(values)):
+        x = x1 - i
+        if x < x0:
+            break
+        y = bottom - round(max(0.0, min(1.0, (v - lo) / span)) * (bottom - top))
+        draw.line((x, y, x, bottom), fill=1)
+
+
+# 4980 s -> "1H23M", 59 s -> "59S"
+def _uptime(seconds):
+    if seconds is None:
+        return "--"
+    m = int(seconds) // 60
+    if m < 1:
+        return f"{int(seconds)}S"
+    if m < 60:
+        return f"{m}M"
+    if m < 24 * 60:
+        return f"{m // 60}H{m % 60:02d}M"
+    return f"{m // (24 * 60)}D{m // 60 % 24}H"
+
+
+# Bytes pro Sekunde kurz: 850, 12K, 1.2M
+def _rate(bps):
+    if bps is None:
+        return "--"
+    if bps < 1000:
+        return f"{bps:.0f}"
+    if bps < 10_000:
+        return f"{bps / 1000:.1f}K"
+    if bps < 1_000_000:
+        return f"{bps / 1000:.0f}K"
+    return f"{bps / 1_000_000:.1f}M"
 
 
 # ---------------------------------------------------------------- Statusseiten
@@ -159,6 +216,275 @@ def page_system(draw, s):
         else:
             draw.rectangle((x, y - 1, x + col_w - 3, y + 7), fill=1)
             SMALL.draw(draw, (x + 2, y + 1), n.name + " !", 0)
+
+
+# ---------------------------------------------------------------- Hardware-Seiten
+# Akku aus livelybot_power, Rechner, Temperaturen und Netz-Interfaces aus hardware_interfaces (ueber local_hardware)
+
+
+# Seite AKKU: Spannung, Strom, Leistung, Ladung, Spannungsverlauf, Temperatur und BMS-Fehler
+def page_battery(draw, s):
+    header(draw, "AKKU", s)
+    v, a = s.battery_voltage, s.battery_current_a
+    BIG.draw(draw, (0, 12), volt(v))
+    text_right(draw, W - 1, 12, _num(a, "{:.1f} A"))
+    text_right(draw, W - 1, 21, "--" if v is None or a is None else f"{v * a:.0f} W")
+    SMALL.draw(draw, (0, 31), "LADUNG")
+    bar(draw, 26, 30, 78, 7, (s.battery_percent or 0) / 100)
+    text_right(draw, W - 1, 30, f"{_num(s.battery_percent)}%")
+    # Spannungsverlauf der letzten 2 min, Massstab aus Minimum und Maximum (mindestens 0,5 V)
+    hist = s.battery_history
+    top, bottom = 39, 50
+    draw.line((0, bottom, W - 1, bottom), fill=1)
+    if hist:
+        lo, hi = min(hist), max(hist)
+        if hi - lo < 0.5:
+            lo, hi = (lo + hi) / 2 - 0.25, (lo + hi) / 2 + 0.25
+        _area(draw, hist, 0, W - 1, top, bottom, lo, hi)
+        SMALL.draw(draw, (0, 53), f"MIN {min(hist):.1f}V")
+    if v is None:
+        text_center(draw, 41, "KEIN AKKU-TOPIC", SMALL)
+    elif s.battery_age_s is not None and s.battery_age_s > BATTERY_STALE_S:
+        text_center(draw, 53, f"VOR {s.battery_age_s:.0f} S", SMALL)
+    else:
+        text_center(draw, 53, f"TEMP {_num(s.battery_temp_c)}C", SMALL)
+    if s.bms_error:
+        text = f"BMS {s.bms_error}"
+        x = W - SMALL.width(text) - 2
+        draw.rectangle((x - 2, 52, W - 1, 58), fill=1)
+        SMALL.draw(draw, (x, 53), text, 0)
+    else:
+        text_right(draw, W - 1, 53, "BMS --" if s.bms_error is None else "BMS OK", SMALL)
+
+
+# Seite RECHNER: CPU-Last mit Verlauf, Takt, Load, Laufzeit, RAM und Platte
+def page_computer(draw, s):
+    header(draw, "RECHNER", s)
+    SMALL.draw(draw, (0, 13), "CPU")
+    NORMAL.draw(draw, (16, 12), f"{_num(s.cpu_percent)}%")
+    ghz = "--" if s.cpu_mhz is None else f"{s.cpu_mhz / 1000:.1f}"
+    text_right(draw, W - 1, 13, f"{ghz} GHZ  {_num(s.cpu_temp_c)}C", SMALL)
+    top, bottom = 21, 42
+    # Massstab laeuft mit (hoechster Wert auf 10 % aufgerundet, mindestens 10 %); mit fest 100 % bliebe der Verlauf
+    # bei wenig Last, z. B. 2 % auf einem Laptop, eine Linie am Boden
+    scale = min(100, max(10, math.ceil(max(s.cpu_history, default=0.0) / 10) * 10))
+    _dashed(draw, 0, W - 1, top)
+    draw.line((0, bottom, W - 1, bottom), fill=1)
+    _area(draw, s.cpu_history, 0, W - 1, top, bottom, 0.0, scale)
+    label = f"{scale}%"
+    draw.rectangle((0, top, SMALL.width(label) + 1, top + 6), fill=0)
+    SMALL.draw(draw, (0, top + 1), label)
+    if not s.cpu_history:
+        text_center(draw, 29, "KEINE CPU-DATEN", SMALL)
+    if s.load_avg:
+        SMALL.draw(draw, (0, 45), "LOAD " + " ".join(f"{v:.2f}" for v in s.load_avg))
+    else:
+        SMALL.draw(draw, (0, 45), "LOAD --")
+    text_right(draw, W - 1, 45, f"UP {_uptime(s.uptime_s)}", SMALL)
+    if s.ram_used_gb is not None:
+        SMALL.draw(draw, (0, 53), f"RAM {s.ram_used_gb:.1f}/{s.ram_total_gb:.1f}G {_num(s.ram_percent)}%")
+    else:
+        SMALL.draw(draw, (0, 53), f"RAM {_num(s.ram_percent)}%")
+    text_right(draw, W - 1, 53, f"DISK {_num(s.disk_percent)}%", SMALL)
+
+
+# Seite TEMPERATUR: alle Fuehler des Rechners und der Akku, heissester oben, ab TEMP_HOT_C invertiert
+def page_temperatures(draw, s):
+    header(draw, "TEMPERATUR", s)
+    sensors = list(s.temps)
+    if s.battery_temp_c is not None:
+        sensors.append(TempSensor("AKKU", s.battery_temp_c))
+    sensors.sort(key=lambda t: -t.celsius)
+    if not sensors:
+        text_center(draw, 28, "KEINE FUEHLER", SMALL)
+        return
+    for i, t in enumerate(sensors[:ROWS]):
+        y = 12 + i * 8
+        hot = t.celsius >= TEMP_HOT_C
+        if hot:
+            draw.rectangle((0, y - 1, W - 1, y + 5), fill=1)
+        fill = 0 if hot else 1
+        SMALL.draw(draw, (1, y), t.name, fill)
+        frac = (t.celsius - TEMP_MIN_C) / (TEMP_MAX_C - TEMP_MIN_C)
+        x0, width = 46, 56
+        draw.rectangle((x0, y, x0 + width - 1, y + 4), outline=fill)
+        inner = round((width - 2) * max(0.0, min(1.0, frac)))
+        if inner > 0:
+            draw.rectangle((x0 + 1, y + 1, x0 + inner, y + 3), fill=fill)
+        text_right(draw, W - 2, y, f"{t.celsius:.0f}C", SMALL, fill)
+    more = len(sensors) - ROWS
+    footer = f"+{more} WEITERE, " if more > 0 else ""
+    SMALL.draw(draw, (1, 54), f"{footer}AB {TEMP_HOT_C:.0f}C INVERTIERT")
+
+
+# Seite NETZ-IO: je Interface Zustand, IPv4 und Bytes pro Sekunde empfangen/gesendet (can0 = Motorbus)
+def page_net_io(draw, s):
+    header(draw, "NETZ-IO", s)
+    if not s.net_ifaces:
+        text_center(draw, 28, "KEINE INTERFACES", SMALL)
+        return
+    for i, n in enumerate(s.net_ifaces[:ROWS]):
+        y = 12 + i * 8
+        SMALL.draw(draw, (1, y), n.name[:7])
+        if not n.up:
+            SMALL.draw(draw, (31, y), "AUS")
+            continue
+        SMALL.draw(draw, (31, y), n.ip or "-")
+        text_right(draw, W - 1, y, f"{_rate(n.rx_bps)} {_rate(n.tx_bps)}", SMALL)
+    SMALL.draw(draw, (1, 54), "IF  IPV4")
+    text_right(draw, W - 1, 54, "EMPF SEND B/S", SMALL)
+
+
+# ---------------------------------------------------------------- Graph-Seiten
+# Fuers Debugging, entstanden aus den echten Node-Daten (node_output.txt): Feldkarte, Last je Gelenk, Beinlast, Datenfluss
+
+
+# Seite FELD: Feldkarte mit Position, Blickrichtung und Spur, rechts die Zahlen
+def page_field(draw, s):
+    header(draw, "FELD", s)
+    ppm = 8  # Pixel pro Meter
+    fw, fh = int(FIELD_L * ppm), int(FIELD_W * ppm)
+    x0, y0 = 3, 12
+    draw.rectangle((x0, y0, x0 + fw, y0 + fh), outline=1)
+    cx, cy = x0 + fw // 2, y0 + fh // 2
+    draw.line((cx, y0, cx, y0 + fh), fill=1)
+    r = int(CIRCLE_R * ppm)
+    draw.ellipse((cx - r, cy - r, cx + r, cy + r), outline=1)
+    goal = int(2.6 * ppm) // 2
+    draw.line((x0 - 2, cy - goal, x0 - 2, cy + goal), fill=1)  # eigenes Tor links
+    draw.line((x0 + fw + 2, cy - goal, x0 + fw + 2, cy + goal), fill=1)  # gegnerisches Tor rechts
+
+    def to_px(x, y):
+        return round(cx + x * ppm), round(cy - y * ppm)
+
+    for x, y in s.pose_trail[:-1]:
+        draw.point(to_px(x, y), fill=1)
+    tx = x0 + fw + 5
+    if s.pose is None:
+        SMALL.draw(draw, (tx, 14), "KEINE")
+        SMALL.draw(draw, (tx, 21), "POSE")
+        return
+    x, y, theta = s.pose
+    px, py = to_px(x, y)
+    draw.ellipse((px - 2, py - 2, px + 2, py + 2), fill=1)
+    a = math.radians(theta)
+    draw.line((px, py, px + round(6 * math.cos(a)), py - round(6 * math.sin(a))), fill=1)
+    SMALL.draw(draw, (tx, 13), "X")
+    text_right(draw, W - 1, 12, f"{x:+.1f}")
+    SMALL.draw(draw, (tx, 22), "Y")
+    text_right(draw, W - 1, 21, f"{y:+.1f}")
+    SMALL.draw(draw, (tx, 31), "W")
+    text_right(draw, W - 1, 30, f"{theta:+d}")
+    SMALL.draw(draw, (tx, 41), "LOK")
+    lok = "--" if s.loc_confidence is None else round(s.loc_confidence * 100)
+    text_right(draw, W - 1, 40, f"{lok}%")
+    bar(draw, tx, 49, W - tx, 6, s.loc_confidence or 0.0)
+
+
+# Gruppe eines Motors fuer die Lastseite anhand des Namens (l-hip-pitch, head-yaw, ...)
+def _group(name):
+    if name.startswith("head"):
+        return "KOPF"
+    if any(j in name for j in ("hip", "thigh", "calf", "ankle")):
+        return "L BEIN" if name.startswith("l") else "R BEIN"
+    return "ARME"
+
+
+# Seite LAST: Drehmoment aller Motoren als Balken, gestrichelt die Ueberlastgrenze
+def page_load(draw, s):
+    header(draw, "LAST", s)
+    top, bottom = 12, 45
+    height = bottom - top
+    x = 1
+    groups = []
+    prev = None
+    for m in s.motors:
+        g = _group(m.name)
+        if g != prev:
+            if prev is not None:
+                x += 3
+            groups.append([g, x, x])
+            prev = g
+        if not m.ok:
+            draw.rectangle((x, top, x + 3, bottom), outline=1)
+            draw.line((x, top, x + 3, bottom), fill=1)
+        elif m.effort_nm is not None:
+            h = round(min(1.0, abs(m.effort_nm) / LOAD_SCALE_NM) * height)
+            draw.rectangle((x, bottom - h, x + 3, bottom), fill=1)
+        draw.point((x + 1, bottom + 1), fill=1)
+        groups[-1][2] = x + 3
+        x += 5
+    if s.motors:
+        _dashed(draw, 0, x - 2, bottom - round(OVERLOAD_NM / LOAD_SCALE_NM * height))
+    for g, gx0, gx1 in groups:
+        label_w = SMALL.width(g)
+        if label_w <= gx1 - gx0 + 4:
+            SMALL.draw(draw, ((gx0 + gx1 - label_w) // 2, 48), g)
+    known = [m for m in s.motors if m.effort_nm is not None]
+    if not s.motors:
+        SMALL.draw(draw, (1, 54), "KEINE MOTORDATEN")
+    elif known:
+        top_m = max(known, key=lambda m: abs(m.effort_nm))
+        SMALL.draw(draw, (1, 54), f"MAX {abs(top_m.effort_nm):.1f} NM {top_m.name}")
+
+
+# Seite LASTVERLAUF: hoechste Bein-Last der letzten 6 s als Linie, mit Ueberlastgrenze
+def page_load_history(draw, s):
+    header(draw, "BEINLAST", s)
+    x0, x1, top, bottom = 14, W - 1, 12, 50
+    height = bottom - top
+    SMALL.draw(draw, (0, top), f"{LOAD_SCALE_NM:.0f}")
+    SMALL.draw(draw, (0, bottom - round(OVERLOAD_NM / LOAD_SCALE_NM * height) - 2), f"{OVERLOAD_NM:.0f}")
+    SMALL.draw(draw, (4, bottom - 4), "0")
+    draw.line((x0 - 2, top, x0 - 2, bottom), fill=1)
+    draw.line((x0 - 2, bottom, x1, bottom), fill=1)
+    _dashed(draw, x0, x1, bottom - round(OVERLOAD_NM / LOAD_SCALE_NM * height))
+    hist = s.leg_effort_history
+    step = (x1 - x0) / 59  # 60 Werte = 6 s
+    pts = []
+    for i, v in enumerate(hist):
+        x = x1 - round((len(hist) - 1 - i) * step)
+        y = bottom - round(min(1.0, v / LOAD_SCALE_NM) * height)
+        pts.append((x, y))
+    if len(pts) > 1:
+        draw.line(pts, fill=1)
+    elif pts:
+        draw.point(pts[0], fill=1)
+    SMALL.draw(draw, (x0, 54), "-6 S")
+    if hist:
+        text_right(draw, W - 1, 53, f"{hist[-1]:.1f} NM", SMALL)
+    else:
+        text_right(draw, W - 1, 53, "KEINE DATEN", SMALL)
+
+
+# Seite DATENFLUSS: Empfangsrate je Topic, fehlende Topics zusammengefasst
+def page_topics(draw, s):
+    header(draw, "DATENFLUSS", s)
+    received = [t for t in s.topics if t.age_s is not None]
+    missing = [t for t in s.topics if t.age_s is None]
+    for i, t in enumerate(received[:5]):
+        y = 12 + i * 8
+        # Veraltet: laenger still als 3 Perioden, mindestens 1 s
+        stale = t.age_s > (max(1.0, 3.0 / t.hz) if t.hz else 1.0)
+        if stale:
+            draw.rectangle((0, y - 1, W - 1, y + 5), fill=1)
+        fill = 0 if stale else 1
+        SMALL.draw(draw, (1, y), t.name, fill)
+        if not t.hz:
+            rate = "-- HZ"
+        else:
+            rate = f"{t.hz:.0f} HZ" if t.hz >= 1 else f"{t.hz:.1f} HZ"
+        text_right(draw, 72, y, rate, SMALL, fill)
+        if stale:
+            text_right(draw, W - 2, y, f"VOR {t.age_s:.0f} S", SMALL, 0)
+        elif t.hz:
+            # Rate logarithmisch: 1 Hz kurz, 100 Hz fast voll
+            frac = min(1.0, math.log10(max(t.hz, 1.0)) / 2.0)
+            draw.rectangle((78, y, 78 + max(1, round(frac * 48)), y + 4), fill=1)
+    if missing:
+        names = " ".join(t.name for t in missing[:3])
+        more = f" +{len(missing) - 3}" if len(missing) > 3 else ""
+        SMALL.draw(draw, (1, 54), f"FEHLT: {names}{more}")
 
 
 STATUS_PAGES = [
