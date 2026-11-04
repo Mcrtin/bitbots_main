@@ -88,8 +88,9 @@ class MyNode(Node):
                 )
 
     def timer_callback(self):
-        # This method will be called every 0.5 seconds
+
         self.get_logger().info("Timer callback executed.")
+
 
 
 def main(args=None):
