@@ -1,6 +1,6 @@
-# Fuellt den RobotState aus den Topics des Bit-Bots-Stacks.
-# Die Subscriptions werden an eine bestehende Node gehaengt (siehe status_display.py),
-# es gibt keinen eigenen Thread und keinen eigenen Executor.
+# Fuellt den RobotState aus den Nachrichten des Bit-Bots-Stacks.
+# Die Subscriptions liegen in display.py; deren Callbacks reichen jede Nachricht an die passende on_*-Methode weiter.
+# Es gibt keinen eigenen Thread und keinen eigenen Executor.
 
 import copy
 import math
@@ -8,26 +8,12 @@ import socket
 import subprocess
 import threading
 import time
+from collections import deque
 
 from transforms3d.euler import quat2euler
 
-from .state import Motor, RobotState
+from .state import Motor, RobotState, TopicStat
 from .state import Node as NodeStatus
-
-DEFAULT_TOPICS = {
-    # Schluessel: Topic                           Typ                                        Quelle im Stack
-    "gamestate": "gamestate",  # game_controller_hsl_interfaces/GameState  game_controller_hsl
-    "strategy": "strategy",  # bitbots_msgs/Strategy                     bitbots_blackboard
-    "robot_state": "robot_state",  # bitbots_msgs/RobotControlState            bitbots_hcm
-    "ball": "ball_position_relative_filtered",  # geometry_msgs/PoseWithCovarianceStamped  ball_filter
-    "pose": "pose_with_covariance",  # geometry_msgs/PoseWithCovarianceStamped   Lokalisierung
-    "battery": "battery_voltage",  # std_msgs/Float32                          livelybot_power (power_node)
-    "imu": "imu/data",  # sensor_msgs/Imu                           yesense_imu
-    "camera_info": "/zed/zed_node/rgb/camera_info",  # sensor_msgs/CameraInfo  zed_wrapper, nur als Lebenszeichen
-    "workload": "system_workload",  # bitbots_msgs/Workload                     system_monitor
-    "diagnostics": "diagnostics_agg",  # diagnostic_msgs/DiagnosticArray  Gruppen + Motoren (Servos/<joint>)
-    "team_data": "team_data",  # bitbots_msgs/TeamData                     team_communication
-}
 
 ROLE_NAMES = {0: "?", 1: "PAUSE", 2: "ANDERE", 3: "STURM", 4: "UNTERST.", 5: "ABWEHR", 6: "TOR"}
 ACTION_NAMES = {
@@ -91,6 +77,26 @@ LEG_JOINTS = ["hip_pitch", "hip_roll", "thigh", "calf", "ankle_pitch", "ankle_ro
 # Meldungen aus robot::motorDiagnostic (livelybot_serial) -> kurzer Text fuer die Anzeige
 MOTOR_MESSAGES = {"No CAN data": "KEINE ANTW."}
 TEAM_TIMEOUT_S = 5.0
+JOINT_TIMEOUT_S = 0.5
+# Datenfluss-Seite: Kurzname je Topic-Schluessel, in dieser Reihenfolge wenn gleich schnell
+TOPIC_LABELS = {
+    "joint_states": "GELENKE",
+    "camera_info": "KAMERA",
+    "pose": "LOKALIS.",
+    "strategy": "STRATEGIE",
+    "diagnostics": "DIAGNOSE",
+    "gamestate": "GC",
+    "battery": "AKKU",
+    "imu": "IMU",
+    "ball": "BALL",
+    "robot_state": "HCM",
+    "workload": "SYSTEM",
+    "team_data": "TEAM",
+}
+HZ_WINDOW = 20  # Empfangszeiten je Topic fuer die Rate
+EFFORT_SAMPLE_S = 0.1  # ein Wert pro Zehntelsekunde fuer den Last-Verlauf
+EFFORT_HISTORY = 60  # 6 s
+POSE_TRAIL = 30
 
 
 class RosStatusSource:
@@ -100,9 +106,16 @@ class RosStatusSource:
     simulated = False
 
     # battery_*_v: Spannungen fuer 0 % und 100 %, an den Akku des Pi Plus anpassen
-    def __init__(self, node, topics=None, team_id=None, player_number=None, battery_empty_v=21.0, battery_full_v=25.2):
-        self.node = node
-        self.topics = {**DEFAULT_TOPICS, **(topics or {})}
+    # clock: Zeitquelle in Sekunden, Standard time.monotonic; die Log-Wiedergabe setzt die Simulationszeit ein
+    def __init__(
+        self,
+        team_id=None,
+        player_number=None,
+        battery_empty_v=21.0,
+        battery_full_v=25.2,
+        clock=None,
+    ):
+        self.clock = clock or time.monotonic
         self.team_id = team_id
         self.battery_empty_v = battery_empty_v
         self.battery_full_v = battery_full_v
@@ -110,6 +123,13 @@ class RosStatusSource:
         self._stamps = {}  # Topic-Schluessel -> Empfangszeit (monotonic)
         self._teammates = {}  # robot_id -> Empfangszeit
         self._diag_groups = []  # NodeStatus der Diagnose-Gruppen, ohne Kamera
+        self._recv = {}  # Topic-Schluessel -> deque der letzten Empfangszeiten
+        self._diag_motors = {}  # Gelenkname -> (ok, Fehlertext) aus .../Servos/<joint>
+        self._joint_names = []  # Reihenfolge aus joint_states
+        self._efforts = {}  # Gelenkname -> Drehmoment [Nm]
+        self._leg_peak = None  # hoechste Bein-Last seit dem letzten Verlaufswert
+        self._last_effort_sample = None
+        self._gc_diag_stamp = None
         self._strategy_action = "-"
         self._robot_state_text = None
 
@@ -118,42 +138,22 @@ class RosStatusSource:
         if player_number is not None:
             s.player_number = player_number
         s.opp_name = "GEGNER"
-        # Testwerte aus RobotState leeren, bis echte Nachrichten kommen. Die Seiten koennen noch
-        # kein "unbekannt" darstellen, Zahlen stehen daher bis zur ersten Nachricht auf 0.
+        # Testwerte aus RobotState leeren, bis echte Nachrichten kommen; Unbekanntes ist None,
+        # nur Spielstand, Zeit und Lage stehen bis zur ersten Nachricht auf 0
         s.action = "warte auf Daten"
         s.game_state = s.role = "-"
         s.seconds_remaining = s.score_own = s.score_opp = 0
-        s.ball_seen, s.loc_confidence, s.teammates_seen = False, 0.0, 0
-        s.battery_voltage, s.battery_percent = 0.0, 0
+        s.ball_seen, s.teammates_seen = False, 0
+        s.loc_confidence = None
+        s.battery_voltage = s.battery_percent = None
+        s.pose = None
         s.roll_deg = s.pitch_deg = 0.0
-        s.cpu_percent = s.cpu_temp_c = s.ram_percent = 0
+        s.cpu_percent = s.cpu_temp_c = s.ram_percent = None
+        s.kickoff_own = None
         s.gc_connected = False
         s.wlan_ip = s.eth_ip = s.ssid = "-"
         s.wifi_rssi = None
         s.motors, s.nodes = [], []
-        self._subscribe()
-
-    def _subscribe(self):
-        from bitbots_msgs.msg import RobotControlState, Strategy, TeamData, Workload
-        from diagnostic_msgs.msg import DiagnosticArray
-        from game_controller_hsl_interfaces.msg import GameState
-        from geometry_msgs.msg import PoseWithCovarianceStamped
-        from sensor_msgs.msg import CameraInfo, Imu
-        from std_msgs.msg import Float32
-
-        t = self.topics
-        sub = self.node.create_subscription
-        sub(GameState, t["gamestate"], self.on_gamestate, 1)
-        sub(Strategy, t["strategy"], self.on_strategy, 1)
-        sub(RobotControlState, t["robot_state"], self.on_robot_state, 1)
-        sub(PoseWithCovarianceStamped, t["ball"], self.on_ball, 1)
-        sub(PoseWithCovarianceStamped, t["pose"], self.on_pose, 1)
-        sub(Float32, t["battery"], self.on_battery, 1)
-        sub(Imu, t["imu"], self.on_imu, 1)
-        sub(CameraInfo, t["camera_info"], self.on_camera_info, 1)
-        sub(Workload, t["workload"], self.on_workload, 1)
-        sub(DiagnosticArray, t["diagnostics"], self.on_diagnostics, 1)
-        sub(TeamData, t["team_data"], self.on_team_data, 1)
 
     # ------------------------------------------------------------- Schnittstelle fuer DisplayApp
 
@@ -181,11 +181,13 @@ class RosStatusSource:
 
     # Aus Empfangszeiten abgeleitete Werte (verbunden, gesehen, ...)
     def update(self, dt):
-        now = time.monotonic()
+        now = self.clock()
         with self._lock:
             s = self._state
             gc_age = now - self._stamps.get("gamestate", -1e9)
-            s.gc_connected = gc_age < GC_TIMEOUT_S
+            # Ohne gamestate (z. B. Node abonniert es nicht) zaehlt die Diagnose des GC-Clients
+            gc_diag_ok = s.gc_diag == "Connected" and now - self._stamps.get("diagnostics", -1e9) < GC_TIMEOUT_S
+            s.gc_connected = gc_age < GC_TIMEOUT_S or gc_diag_ok
             s.gc_age_s = min(gc_age, 99.9)
             s.ball_seen = now - self._stamps.get("ball", -1e9) < BALL_TIMEOUT_S
             s.imu_ok = now - self._stamps.get("imu", -1e9) < IMU_TIMEOUT_S
@@ -194,9 +196,52 @@ class RosStatusSource:
             s.teammates_seen = sum(1 for t in self._teammates.values() if now - t < TEAM_TIMEOUT_S)
             if s.penalty and s.penalty_seconds > 0:
                 s.penalty_seconds = max(0, s.penalty_seconds - dt)
+            s.motors = self._build_motors(now)
+            self._sample_effort(now)
+            s.topics = self._topic_stats(now)
 
     def _touch(self, key):
-        self._stamps[key] = time.monotonic()
+        now = self.clock()
+        self._stamps[key] = now
+        self._recv.setdefault(key, deque(maxlen=HZ_WINDOW)).append(now)
+
+    # Motorliste aus Diagnose (Zustand) und joint_states (Drehmoment), sortiert wie im Raster
+    def _build_motors(self, now):
+        joints_fresh = now - self._stamps.get("joint_states", -1e9) < JOINT_TIMEOUT_S
+        names = list(dict.fromkeys(list(self._diag_motors) + self._joint_names))
+        motors = []
+        for i, name in enumerate(sorted(names, key=_joint_order)):
+            if name in self._diag_motors:
+                ok, error = self._diag_motors[name]
+            else:
+                ok, error = joints_fresh, "" if joints_fresh else "KEINE DATEN"
+            effort = self._efforts.get(name) if joints_fresh else None
+            motors.append(Motor(i + 1, _short_joint(name), ok, temp_c=None, error=error, effort_nm=effort))
+        return motors
+
+    def _sample_effort(self, now):
+        if self._last_effort_sample is not None and now - self._last_effort_sample < EFFORT_SAMPLE_S:
+            return
+        self._last_effort_sample = now
+        if self._leg_peak is None:
+            return
+        hist = self._state.leg_effort_history
+        hist.append(self._leg_peak)
+        del hist[:-EFFORT_HISTORY]
+        self._leg_peak = None
+
+    def _topic_stats(self, now):
+        stats = []
+        for key, label in TOPIC_LABELS.items():
+            times = self._recv.get(key)
+            if not times:
+                stats.append(TopicStat(label))
+                continue
+            span = times[-1] - times[0]
+            hz = (len(times) - 1) / span if span > 0 else None
+            stats.append(TopicStat(label, hz, now - times[-1]))
+        # Empfangene zuerst, schnellste oben; dann die fehlenden in fester Reihenfolge
+        return sorted(stats, key=lambda t: (t.age_s is None, -(t.hz or 0.0)))
 
     # ------------------------------------------------------------- Callbacks
 
@@ -223,12 +268,14 @@ class RosStatusSource:
 
     def on_strategy(self, msg):
         with self._lock:
+            self._touch("strategy")
             self._state.role = ROLE_NAMES.get(msg.role, "?")
             self._strategy_action = ACTION_NAMES.get(msg.action, "-")
             self._apply_action()
 
     def on_robot_state(self, msg):
         with self._lock:
+            self._touch("robot_state")
             self._robot_state_text = ROBOT_STATE_TEXT.get(msg.state)
             self._apply_action()
 
@@ -246,16 +293,22 @@ class RosStatusSource:
         p, q = msg.pose.pose.position, msg.pose.pose.orientation
         _, _, yaw = quat2euler((q.w, q.x, q.y, q.z))
         cov = msg.pose.covariance
-        # Grobe Konfidenz aus der Positionsunsicherheit (1 = sicher). Heuristik, ggf. anpassen.
-        sigma = math.sqrt(max(0.0, cov[0]) + max(0.0, cov[7]))
+        # Grobe Konfidenz aus Positions- und Winkelunsicherheit (1 = sicher). Heuristik, ggf. anpassen;
+        # in der Simulation sind die x/y-Varianzen 0, nur die Yaw-Varianz ist gesetzt
+        sigma = math.sqrt(max(0.0, cov[0]) + max(0.0, cov[7])) + math.sqrt(max(0.0, cov[35]))
         with self._lock:
-            self._state.pose = (p.x, p.y, round(math.degrees(yaw)))
-            self._state.loc_confidence = math.exp(-sigma)
+            self._touch("pose")
+            s = self._state
+            s.pose = (p.x, p.y, round(math.degrees(yaw)))
+            s.loc_confidence = math.exp(-sigma)
+            s.pose_trail.append((p.x, p.y))
+            del s.pose_trail[:-POSE_TRAIL]
 
     def on_battery(self, msg):
         v = float(msg.data)
         span = self.battery_full_v - self.battery_empty_v
         with self._lock:
+            self._touch("battery")
             self._state.battery_voltage = v
             self._state.battery_percent = max(0.0, min(100.0, (v - self.battery_empty_v) / span * 100))
 
@@ -270,6 +323,18 @@ class RosStatusSource:
         with self._lock:
             self._touch("camera_info")
 
+    # Drehmoment je Gelenk; Zustand (ok/Fehler) kommt aus der Diagnose, sonst gilt "Daten kommen" als ok
+    def on_joint_states(self, msg):
+        efforts = dict(zip(msg.name, msg.effort, strict=False))
+        legs = [abs(e) for n, e in efforts.items() if _joint_order(n)[0] < 2]
+        with self._lock:
+            self._touch("joint_states")
+            if list(msg.name) != self._joint_names:
+                self._joint_names = list(msg.name)
+            self._efforts = efforts
+            if legs:
+                self._leg_peak = max(legs) if self._leg_peak is None else max(self._leg_peak, max(legs))
+
     def on_workload(self, msg):
         wlan = eth = None
         for iface in msg.network_interfaces:
@@ -281,6 +346,7 @@ class RosStatusSource:
             elif iface.name.startswith("e") and eth is None:
                 eth = ip
         with self._lock:
+            self._touch("workload")
             s = self._state
             s.cpu_percent = int(msg.cpu_usage_overall)
             if msg.memory_total:
@@ -302,19 +368,19 @@ class RosStatusSource:
             for st in msg.status
             if st.name.count("/") == depth
         ]
-        servos = [st for st in msg.status if "/Servos/" in st.name]
-        motors = [_motor_from_status(st) for st in sorted(servos, key=_motor_order)]
-        for i, m in enumerate(motors):
-            m.id = i + 1
+        motors = {_servo_name(st): _motor_status(st) for st in msg.status if "/Servos/" in st.name}
+        gc = next((st.message for st in msg.status if st.name.endswith("/Game Controller")), "")
         with self._lock:
+            self._touch("diagnostics")
             self._diag_groups = groups
-            if motors:
-                self._state.motors = motors
+            self._diag_motors = motors
+            self._state.gc_diag = gc
 
     def on_team_data(self, msg):
         with self._lock:
+            self._touch("team_data")
             if msg.robot_id != self._state.player_number:
-                self._teammates[msg.robot_id] = time.monotonic()
+                self._teammates[msg.robot_id] = self.clock()
 
     # Werte, die es nicht als Topic gibt: CPU-Temperatur, WLAN-Name und -Signal
     def poll_local(self):
@@ -337,8 +403,7 @@ def _servo_name(status):
     return status.name.split("/Servos/", 1)[1].strip()
 
 
-def _motor_order(status):
-    name = _servo_name(status)
+def _joint_order(name):
     for side, prefix in enumerate(("l_", "r_")):
         for i, joint in enumerate(LEG_JOINTS):
             if name.startswith(prefix + joint):
@@ -346,11 +411,11 @@ def _motor_order(status):
     return (2, 0, name)
 
 
-# OK und WARN (z. B. Drehmoment-Ueberlast) zaehlen als laufend, ERROR und STALE nicht
-def _motor_from_status(status):
+# (ok, Fehlertext); OK und WARN (z. B. Drehmoment-Ueberlast) zaehlen als laufend, ERROR und STALE nicht
+def _motor_status(status):
     ok = _level(status) <= 1
     error = "" if ok else MOTOR_MESSAGES.get(status.message, status.message.upper()[:11])
-    return Motor(0, _short_joint(_servo_name(status)), ok, temp_c=None, error=error)
+    return ok, error
 
 
 # 'LKnee' / 'left_knee_joint' -> kurzer Anzeigename

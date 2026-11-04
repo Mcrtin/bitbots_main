@@ -72,7 +72,7 @@ def text_right(draw, x_right, y, text, font=NORMAL, fill=1):
 def battery(draw, x, y, percent, fill=1):
     draw.rectangle((x, y, x + 11, y + 6), outline=fill)
     draw.rectangle((x + 12, y + 2, x + 12, y + 4), fill=fill)
-    segs = 0 if percent <= 5 else min(4, 1 + int(percent) // 25)
+    segs = 0 if percent is None or percent <= 5 else min(4, 1 + int(percent) // 25)
     for i in range(segs):
         sx = x + 2 + i * 2
         draw.rectangle((sx, y + 2, sx, y + 4), fill=fill)
@@ -101,7 +101,7 @@ def header(draw, left, state, fill=1):
     NORMAL.draw(draw, (0, 0), left, fill)
     xr = W - 1
     battery(draw, xr - 12, 0, state.battery_percent, fill)
-    pct = f"{state.battery_percent:d}%"
+    pct = "--%" if state.battery_percent is None else f"{state.battery_percent:d}%"
     text_right(draw, xr - 16, 0, pct, NORMAL, fill)
     wifi(draw, xr - 16 - NORMAL.width(pct) - 10, 0, state.wifi_rssi, fill)
     draw.line((0, HEADER_H, W - 1, HEADER_H), fill=fill)

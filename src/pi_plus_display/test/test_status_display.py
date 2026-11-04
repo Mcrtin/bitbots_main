@@ -11,9 +11,8 @@ from pi_plus_display.state import RobotState
 from pi_plus_display.uart import TYPE_JOYSTICK, FrameParser, joystick_events
 
 
-def _source(monkeypatch):
-    monkeypatch.setattr(RosStatusSource, "_subscribe", lambda self: None)
-    return RosStatusSource(node=None, team_id=6, player_number=2)
+def _source():
+    return RosStatusSource(team_id=6, player_number=2)
 
 
 def test_all_status_pages_render():
@@ -58,8 +57,8 @@ def test_frame_parser_split_and_garbage():
     assert joystick_events(frames) == ["right", "left"]
 
 
-def test_joystick_drives_app(monkeypatch):
-    src = _source(monkeypatch)
+def test_joystick_drives_app():
+    src = _source()
     app = DisplayApp(src)
     app.mode = "status"
     for key in joystick_events(FrameParser().feed(_joystick_frame(3))):
@@ -67,8 +66,8 @@ def test_joystick_drives_app(monkeypatch):
     assert app.page == 1
 
 
-def test_callbacks_fill_state(monkeypatch):
-    src = _source(monkeypatch)
+def test_callbacks_fill_state():
+    src = _source()
     v = SimpleNamespace
     src.on_strategy(v(role=3, action=2))
     src.on_battery(v(data=src.battery_full_v))
@@ -91,8 +90,8 @@ def _diag(name, level, message="OK"):
 
 
 # Namen wie vom Aggregator (bitbots_diagnostic) und von livelybot_serial (DS <joint>)
-def test_diagnostics_groups_and_motors(monkeypatch):
-    src = _source(monkeypatch)
+def test_diagnostics_groups_and_motors():
+    src = _source()
     statuses = [
         _diag("/Robot", 2, "Error"),
         _diag("/Robot/Camera", 0),
@@ -119,3 +118,37 @@ def test_diagnostics_groups_and_motors(monkeypatch):
     assert src.snapshot().nodes[-1].ok
     img = render_status(s, 3)  # Motorseite mit Fehlertext
     assert img.getbbox() is not None
+
+
+_LOG = """\
+[INFO] [my_node]: msg=sensor_msgs.msg.JointState(header=std_msgs.msg.Header(\
+stamp=builtin_interfaces.msg.Time(sec=1, nanosec=0), frame_id=''), name=['l_hip_pitch_joint', 'head_yaw_joint'], \
+position=[0.1, 0.0], velocity=[0.0, 0.0], effort=[-12.5, 0.3]) (joint_state_cb() at display.py:40)
+[INFO] [my_node]: msg=geometry_msgs.msg.PoseWithCovarianceStamped(header=std_msgs.msg.Header(\
+stamp=builtin_interfaces.msg.Time(sec=1, nanosec=500000000), frame_id='map'), \
+pose=geometry_msgs.msg.PoseWithCovariance(pose=geometry_msgs.msg.Pose(\
+position=geometry_msgs.msg.Point(x=-2.0, y=1.0, z=0.0), \
+orientation=geometry_msgs.msg.Quaternion(x=0.0, y=0.0, z=0.0, w=1.0)), covariance=array([0.01, 0. , 0. , 0. , 0. , 0. ,
+       0. , 0.01, 0. , 0. , 0. , 0. , 0. , 0. , 0. , 0. , 0. , 0. , 0. , 0. , 0. , 0. , 0. , 0. ,
+       0. , 0. , 0. , 0. , 0. , 0. , 0. , 0. , 0. , 0. , 0. , 0.01]))) (pose_cb() at display.py:52)
+[INFO] [my_node]: kein msg-Eintrag (other_cb() at display.py:60)
+"""
+
+
+def test_log_replay_fills_all_pages(tmp_path):
+    from pi_plus_display.log_replay import LogReplay
+
+    log = tmp_path / "node_output.txt"
+    log.write_text(_LOG)
+    replay = LogReplay(log)
+    assert [h for _, h, _ in replay.events] == ["on_joint_states", "on_pose"]
+    replay.advance_to(replay.end)
+    replay.source.update(0.1)
+    s = replay.source.snapshot()
+    assert s.pose is not None and s.pose[:2] == (-2.0, 1.0)
+    efforts = {m.name: m.effort_nm for m in s.motors}
+    assert efforts[next(n for n in efforts if n.startswith("l-hip"))] == -12.5
+    for i in range(len(STATUS_PAGES)):
+        img = render_status(s, i)
+        assert img.size == (128, 64)
+        assert img.getbbox() is not None

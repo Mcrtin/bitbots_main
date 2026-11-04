@@ -8,7 +8,22 @@
 
 from PIL import Image, ImageDraw
 
+from .graph_pages import page_field, page_load, page_load_history, page_topics
 from .widgets import BIG, NORMAL, SMALL, H, W, bar, header, label_value, page_dots, status_tag, text_center, text_right
+
+
+# Akkuspannung oder "--.-V", wenn noch keine Nachricht kam
+def volt(v):
+    return "--.-V" if v is None else f"{v:.1f}V"
+
+
+# Zahl oder "--", wenn der Wert noch unbekannt ist
+def _num(v):
+    return "--" if v is None else f"{v}"
+
+
+def _pct(v):
+    return f"{_num(v)}%"
 
 
 def _mmss(seconds):
@@ -26,17 +41,25 @@ def _who(state):
 # Seite 1: Spiel. Das Wichtigste fuer Schiedsrichter und Team am Feldrand
 def page_game(draw, s):
     header(draw, _who(s), s)
-    text_center(draw, 12, s.game_state, BIG)
-    text_center(draw, 29, f"{s.team_name} {s.score_own}:{s.score_opp} {s.opp_name}")
-    SMALL.draw(draw, (0, 41), f"{s.half}. HZ")
-    text_center(draw, 40, _mmss(s.seconds_remaining))
-    text_right(draw, W - 1, 41, "ANSTOSS" if s.kickoff_own else "GEGNER", SMALL)
+    if s.game_state == "-":
+        # noch kein gamestate empfangen; ob der GC-Client laeuft, steht trotzdem in der Diagnose
+        text_center(draw, 14, "KEIN SPIELSTAND", NORMAL)
+        text_center(draw, 26, "gamestate fehlt", NORMAL)
+    else:
+        text_center(draw, 12, s.game_state, BIG)
+        text_center(draw, 29, f"{s.team_name} {s.score_own}:{s.score_opp} {s.opp_name}")
+        SMALL.draw(draw, (0, 41), f"{s.half}. HZ")
+        text_center(draw, 40, _mmss(s.seconds_remaining))
+        if s.kickoff_own is not None:
+            text_right(draw, W - 1, 41, "ANSTOSS" if s.kickoff_own else "GEGNER", SMALL)
     if s.penalty:
         draw.rectangle((0, 50, W - 1, 58), fill=1)
         text_center(draw, 51, f"STRAFE {s.penalty} {_mmss(s.penalty_seconds)}", NORMAL, fill=0)
     elif not s.gc_connected:
         draw.rectangle((0, 50, W - 1, 58), outline=1)
         text_center(draw, 52, "KEIN GAMECONTROLLER", SMALL)
+    elif s.game_state == "-":
+        text_center(draw, 52, "GC-CLIENT VERBUNDEN", SMALL)
     else:
         text_center(draw, 52, s.secondary_state or "keine Strafe", SMALL)
 
@@ -50,8 +73,8 @@ def page_behavior(draw, s):
     ball = f"{s.ball_dist_m:.1f} m" if s.ball_seen else "nicht gesehen"
     label_value(draw, 40, "BALL", ball, x_value=26)
     SMALL.draw(draw, (0, 51), "LOK.")
-    bar(draw, 26, 50, 70, 7, s.loc_confidence)
-    text_right(draw, W - 1, 50, f"{round(s.loc_confidence * 100)}%")
+    bar(draw, 26, 50, 70, 7, s.loc_confidence or 0.0)
+    text_right(draw, W - 1, 50, _pct(None if s.loc_confidence is None else round(s.loc_confidence * 100)))
 
 
 # Seite 3: Netzwerk. IP sofort ablesbar, ohne Monitor oder Scan
@@ -64,8 +87,10 @@ def page_network(draw, s):
     label_value(draw, 32, "ETH", s.eth_ip, x_value=26)
     SMALL.draw(draw, (0, 43), "GC")
     w = status_tag(draw, 26, 41, s.gc_connected)
-    if s.gc_connected:
+    if s.gc_connected and s.gc_age_s < 99:
         NORMAL.draw(draw, (26 + w + 4, 42), f"vor {s.gc_age_s:.1f} s")
+    elif s.gc_connected:
+        NORMAL.draw(draw, (26 + w + 4, 42), "laut Diagnose")
     SMALL.draw(draw, (0, 53), "TEAM")
     NORMAL.draw(draw, (26, 52), f"{s.teammates_seen}/{s.teammates_total} Mitspieler")
 
@@ -96,7 +121,13 @@ def page_motors(draw, s):
     elif not s.motors:
         NORMAL.draw(draw, (0, 38), "keine Motordaten")
     elif all(m.temp_c is None for m in s.motors):
-        NORMAL.draw(draw, (0, 38), f"alle {len(s.motors)} Motoren OK")
+        loaded = [m for m in s.motors if m.effort_nm is not None]
+        if loaded:
+            top = max(loaded, key=lambda m: abs(m.effort_nm))
+            SMALL.draw(draw, (0, 39), "MAX")
+            NORMAL.draw(draw, (18, 38), f"{abs(top.effort_nm):.1f}Nm {top.name}")
+        else:
+            NORMAL.draw(draw, (0, 38), f"alle {len(s.motors)} Motoren OK")
     else:
         hot = max((m for m in s.motors if m.temp_c is not None), key=lambda m: m.temp_c)
         SMALL.draw(draw, (0, 39), "MAX")
@@ -104,18 +135,18 @@ def page_motors(draw, s):
     SMALL.draw(draw, (0, 51), "IMU")
     w = status_tag(draw, 16, 49, s.imu_ok)
     NORMAL.draw(draw, (16 + w + 3, 50), f"R{s.roll_deg:+.0f} P{s.pitch_deg:+.0f}")
-    text_right(draw, W - 1, 50, f"{s.battery_voltage:.1f}V")
+    text_right(draw, W - 1, 50, volt(s.battery_voltage))
 
 
 # Seite 5: Rechnerlast und Zustand der ROS-Nodes
 def page_system(draw, s):
     header(draw, "SYSTEM", s)
     SMALL.draw(draw, (0, 13), "CPU")
-    bar(draw, 18, 12, 66, 7, s.cpu_percent / 100)
-    text_right(draw, W - 1, 12, f"{s.cpu_percent}% {s.cpu_temp_c}C")
+    bar(draw, 18, 12, 66, 7, (s.cpu_percent or 0) / 100)
+    text_right(draw, W - 1, 12, f"{_pct(s.cpu_percent)} {_num(s.cpu_temp_c)}C")
     SMALL.draw(draw, (0, 23), "RAM")
-    bar(draw, 18, 22, 66, 7, s.ram_percent / 100)
-    text_right(draw, W - 1, 22, f"{s.ram_percent}%")
+    bar(draw, 18, 22, 66, 7, (s.ram_percent or 0) / 100)
+    text_right(draw, W - 1, 22, _pct(s.ram_percent))
     draw.line((0, 32, W - 1, 32), fill=1)
     col_w = 43
     for i, n in enumerate(s.nodes[:6]):
@@ -135,6 +166,10 @@ STATUS_PAGES = [
     ("netzwerk", page_network),
     ("motoren", page_motors),
     ("system", page_system),
+    ("feld", page_field),
+    ("last", page_load),
+    ("beinlast", page_load_history),
+    ("datenfluss", page_topics),
 ]
 
 
@@ -221,7 +256,7 @@ def render_fallback(state, seconds=12):
     text_center(d, 22, f"seit {seconds} s keine Daten", NORMAL)
     d.line((0, 33, W - 1, 33), fill=1)
     SMALL.draw(d, (0, 39), "AKKU")
-    NORMAL.draw(d, (26, 38), f"{state.battery_voltage:.1f} V")
+    NORMAL.draw(d, (26, 38), volt(state.battery_voltage))
     SMALL.draw(d, (0, 49), "FW")
     NORMAL.draw(d, (26, 48), "bitbots-oled 0.1")
     return img

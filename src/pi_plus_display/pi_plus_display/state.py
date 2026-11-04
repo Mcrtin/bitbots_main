@@ -15,12 +15,21 @@ class Motor:
     ok: bool = True
     temp_c: float | None = 35.0  # None = unbekannt
     error: str = ""  # kurzer Fehlertext, wenn nicht ok
+    effort_nm: float | None = None  # Drehmoment aus joint_states, None = unbekannt
 
 
 @dataclass
 class Node:
     name: str
     ok: bool = True
+
+
+# Empfangsstatistik eines Topics fuer die Datenfluss-Seite
+@dataclass
+class TopicStat:
+    name: str
+    hz: float | None = None  # None = erst eine Nachricht, Rate noch unbekannt
+    age_s: float | None = None  # None = noch nie empfangen
 
 
 @dataclass
@@ -38,19 +47,21 @@ class RobotState:
     score_own: int = 2
     score_opp: int = 1
     opp_name: str = "HTWK"
-    kickoff_own: bool = True
+    kickoff_own: bool | None = True  # None = unbekannt (Team-ID fehlt)
     penalty: str = ""  # "" = keine, sonst z. B. "PUSHING"
     penalty_seconds: int = 0
     gc_connected: bool = True
     gc_age_s: float = 0.2
+    gc_diag: str = ""  # Meldung der Diagnose "/Robot/Other/Game Controller", z. B. "Connected"
 
     # Verhalten
     role: str = "STURM"
     action: str = "Ball anlaufen"
     ball_seen: bool = True
     ball_dist_m: float = 1.2
-    loc_confidence: float = 0.78
-    pose: tuple = (1.3, -0.8, 45)  # x [m], y [m], theta [Grad]
+    loc_confidence: float | None = 0.78  # 0..1; None = noch keine Pose
+    pose: tuple | None = (1.3, -0.8, 45)  # x [m], y [m], theta [Grad]; None = keine Lokalisierung
+    pose_trail: list = field(default_factory=list)  # letzte Positionen (x, y) fuer die Feldkarte
     teammates_seen: int = 4
     teammates_total: int = 5
 
@@ -61,8 +72,8 @@ class RobotState:
     wifi_rssi: int | None = -58
 
     # Hardware
-    battery_voltage: float = 23.4
-    battery_percent: int = 72
+    battery_voltage: float | None = 23.4  # None = keine Nachricht von battery_voltage
+    battery_percent: int | None = 72
     imu_ok: bool = True
     roll_deg: float = 1.2
     pitch_deg: float = -3.4
@@ -89,9 +100,9 @@ class RobotState:
     )
 
     # System
-    cpu_percent: int = 63
-    cpu_temp_c: int = 71
-    ram_percent: int = 48
+    cpu_percent: int | None = 63  # None = unbekannt
+    cpu_temp_c: int | None = 71
+    ram_percent: int | None = 48
     nodes: list = field(
         default_factory=lambda: [
             Node("vision"),
@@ -102,6 +113,10 @@ class RobotState:
             Node("teamcom"),
         ]
     )
+
+    # Verlauf der hoechsten Bein-Last [Nm], ein Wert pro Zehntelsekunde, aeltester zuerst
+    leg_effort_history: list = field(default_factory=list)
+    topics: list = field(default_factory=list)  # TopicStat
 
     # Hinweis fuer die Alarmseite
     alarm_title: str = ""

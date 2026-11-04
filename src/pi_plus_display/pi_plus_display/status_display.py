@@ -2,8 +2,8 @@
 # Einbinden im Konstruktor der Node (z. B. in display.py):
 #     from pi_plus_display.status_display import StatusDisplay
 #     self.status_display = StatusDisplay(self)
-# StatusDisplay haengt die Subscriptions an die Node, rendert in einem Timer das
-# 128x64-Bild und schickt nur geaenderte Framebuffer-Pages per UART an die Platine.
+# Die Nachrichten bekommt die Anzeige von den Callbacks der Node: self.status_display.source.on_*(msg).
+# StatusDisplay rendert in einem Timer das 128x64-Bild und schickt nur geaenderte Framebuffer-Pages per UART an die Platine.
 # Joystick-Ereignisse der Platine steuern Seiten und Menue.
 # Parameter (alle mit Praefix "display."): siehe declare_parameter unten und config/display.yaml.
 
@@ -12,7 +12,7 @@ import time
 from rclpy.clock import Clock, ClockType
 
 from .app import DisplayApp
-from .ros_source import DEFAULT_TOPICS, RosStatusSource
+from .ros_source import RosStatusSource
 
 
 class StatusDisplay:
@@ -28,15 +28,12 @@ class StatusDisplay:
         baudrate = param("baudrate", 115200)
         frame_rate = param("frame_rate", 10.0)
         self.png_out = param("png_out", "")  # zum Testen ohne Platine: Bild als PNG schreiben
-        topics = {key: param("topics." + key, default) for key, default in DEFAULT_TOPICS.items()}
 
         team_id, player_number = None, None
         if param("use_parameter_blackboard", True):
             team_id, player_number = self._read_game_settings()
 
         self.source = RosStatusSource(
-            node,
-            topics=topics,
             team_id=team_id,
             player_number=player_number,
             battery_empty_v=param("battery_empty_v", 21.0),

@@ -7,6 +7,11 @@ from geometry_msgs.msg import Pose, PoseStamped, PoseWithCovarianceStamped
 from sensor_msgs.msg import JointState
 from bitbots_msgs.msg import Strategy, TeamData
 from sensor_msgs.msg import CameraInfo
+from bitbots_msgs.msg import RobotControlState, Workload
+from game_controller_hsl_interfaces.msg import GameState
+from sensor_msgs.msg import Imu
+
+from pi_plus_display.status_display import StatusDisplay
 
 
 class MyNode(Node):
@@ -31,6 +36,15 @@ class MyNode(Node):
 
         demo = self.get_parameter("demo").get_parameter_value().bool_value
 
+        # Statusanzeige; die Callbacks unten reichen ihr jede Nachricht weiter
+        self.status_display = StatusDisplay(self)
+        display = self.status_display.source
+        if demo:
+            # Demo-Fenster mit Pfeiltasten als Joystick, faellt mit display_demo.py weg
+            from pi_plus_display.display_demo import start_window
+
+            start_window(self, self.status_display)
+
         self.pose = None
         self.camera_info = None
         self.strategy = None
@@ -51,6 +65,15 @@ class MyNode(Node):
         self.create_subscription(
             CameraInfo, "/zed/zed_node/rgb/camera_info", self.camera_info_callback, 1
         )
+        # Nur fuer die Statusanzeige, direkt an deren Callbacks
+        self.create_subscription(GameState, "gamestate", display.on_gamestate, 1)
+        self.create_subscription(RobotControlState, "robot_state", display.on_robot_state, 1)
+        self.create_subscription(
+            PoseWithCovarianceStamped, "ball_position_relative_filtered", display.on_ball, 1
+        )
+        self.create_subscription(Imu, "imu/data", display.on_imu, 1)
+        self.create_subscription(Workload, "system_workload", display.on_workload, 1)
+        self.create_subscription(TeamData, "team_data", display.on_team_data, 1)
 
         # Create timer
         self.timer = self.create_timer(0.5, self.timer_callback)
@@ -58,27 +81,33 @@ class MyNode(Node):
 
     def pose_cb(self, msg: PoseWithCovarianceStamped):
         self.pose = msg.pose
+        self.status_display.source.on_pose(msg)
 
     def camera_info_callback(self, msg: CameraInfo):
         self.get_logger().info(f'{msg=}')
         self.camera_info = msg
+        self.status_display.source.on_camera_info(msg)
 
     def strategy_cb(self, msg: Strategy):
         self.get_logger().info(f'{msg=}')
         self.strategy = msg
+        self.status_display.source.on_strategy(msg)
 
     def joint_state_cb(self, msg: JointState):
         self.get_logger().info(f'{msg=}')
         self.joints = msg
+        self.status_display.source.on_joint_states(msg)
 
     def voltage_cb(self, msg: Float32):
         self.get_logger().info(f'{msg=}')
         """Receives data sent by the battery management system."""
         self.battery_voltage = msg.data
+        self.status_display.source.on_battery(msg)
 
     def diag_cb(self, msg: DiagnosticArray):
         """Updates the diagnostic state."""
         self.get_logger().info(f'{msg=}')
+        self.status_display.source.on_diagnostics(msg)
         status: DiagnosticStatus
         for status in msg.status:
             if "/Servos/" in status.name:

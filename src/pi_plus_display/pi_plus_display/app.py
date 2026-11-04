@@ -113,7 +113,11 @@ class DisplayApp:
         for n in s.nodes:
             if not n.ok and n.name in ok_nodes:
                 self.alarm = ("NODE", f"{n.name} ausgefallen", "neu starten: Menue")
-        if s.battery_percent < LOW_BATTERY_PERCENT <= p.battery_percent:
+        if (
+            s.battery_percent is not None
+            and p.battery_percent is not None
+            and s.battery_percent < LOW_BATTERY_PERCENT <= p.battery_percent
+        ):
             self.alarm = ("AKKU", f"{s.battery_voltage:.1f} V", "bitte laden")
 
     # ------------------------------------------------------------- Rendern
@@ -142,7 +146,8 @@ class DisplayApp:
 
 # Ganzzahlige Anzeigewerte; Quellen duerfen mit float rechnen
 def _display_values(s):
-    s.battery_percent = int(round(s.battery_percent))
+    if s.battery_percent is not None:
+        s.battery_percent = int(round(s.battery_percent))
     s.seconds_remaining = int(s.seconds_remaining)
     s.penalty_seconds = int(s.penalty_seconds)
     return s
