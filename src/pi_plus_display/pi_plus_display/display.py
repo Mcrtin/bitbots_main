@@ -21,7 +21,16 @@ class MyNode(Node):
                     True,
                 )
             ]
+            [
+                rclpy.parameter.Parameter(
+                    "demo",
+                    rclpy.Parameter.Type.BOOL,
+                    True,
+                )
+            ]
         )
+
+        demo = self.get_parameter("demo").get_parameter_value().bool_value
 
         self.pose = None
         self.camera_info = None
