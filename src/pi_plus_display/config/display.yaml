@@ -1,0 +1,12 @@
+# Parameter der Statusanzeige (StatusDisplay in status_display.py), gelten fuer jede Node, die sie einbindet.
+/**:
+  ros__parameters:
+    display:
+      serial_port: /dev/ttyS4   # leer = keine Platine, nur rendern
+      baudrate: 115200
+      frame_rate: 10.0
+      png_out: ""               # z. B. /tmp/display.png zum Testen ohne Platine
+      use_parameter_blackboard: true
+      # Spannungen fuer 0 % und 100 %, noch geschaetzt, am Akku des Pi Plus pruefen
+      battery_empty_v: 21.0
+      battery_full_v: 25.2

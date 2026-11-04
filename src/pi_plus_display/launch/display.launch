@@ -1,0 +1,6 @@
+<?xml version="1.0"?>
+<launch>
+    <node pkg="pi_plus_display" exec="display" output="screen">
+        <param from="$(find-pkg-share pi_plus_display)/config/display.yaml" />
+    </node>
+</launch>
