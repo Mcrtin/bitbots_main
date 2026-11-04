@@ -33,13 +33,16 @@ class MyNode(Node):
         self.servo_diag_error = None
         self.imu_diag_error = None
 
-
         self.create_subscription(Float32, "battery_voltage", self.voltage_cb, 1)
         self.create_subscription(DiagnosticArray, "diagnostics_agg", self.diag_cb, 1)
         self.create_subscription(JointState, "joint_states", self.joint_state_cb, 1)
         self.create_subscription(Strategy, "strategy", self.strategy_cb, 1)
-        self.create_subscription(PoseWithCovarianceStamped, "pose_with_covariance", self.pose_cb, 1)
-        self.create_subscription(CameraInfo, "/zed/zed_node/rgb/camera_info", self.camera_info_callback, 1)
+        self.create_subscription(
+            PoseWithCovarianceStamped, "pose_with_covariance", self.pose_cb, 1
+        )
+        self.create_subscription(
+            CameraInfo, "/zed/zed_node/rgb/camera_info", self.camera_info_callback, 1
+        )
 
         # Create timer
         self.timer = self.create_timer(0.5, self.timer_callback)
@@ -55,9 +58,10 @@ class MyNode(Node):
         self.strategy = msg
 
     def joint_state_cb(self, msg: JointState):
-        self.joints = msg;
+        self.joints = msg
 
     def voltage_cb(self, msg: Float32):
+        self.get_logger().info(f'{msg=}')
         """Receives data sent by the battery management system."""
         self.battery_voltage = msg.data
 
@@ -73,9 +77,15 @@ class MyNode(Node):
                         self.servo_overheat = True
 
             elif "/Servos" in status.name:
-                self.servo_diag_error = status.level in (DiagnosticStatus.ERROR, DiagnosticStatus.STALE)
+                self.servo_diag_error = status.level in (
+                    DiagnosticStatus.ERROR,
+                    DiagnosticStatus.STALE,
+                )
             elif "/IMU" in status.name:
-                self.imu_diag_error = status.level in (DiagnosticStatus.ERROR, DiagnosticStatus.STALE)
+                self.imu_diag_error = status.level in (
+                    DiagnosticStatus.ERROR,
+                    DiagnosticStatus.STALE,
+                )
 
     def timer_callback(self):
         # This method will be called every 0.5 seconds
