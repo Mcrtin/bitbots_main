@@ -9,6 +9,7 @@
 from PIL import Image, ImageDraw
 
 from .graph_pages import page_field, page_load, page_load_history, page_topics
+from .hardware_pages import page_battery, page_computer, page_net_io, page_temperatures
 from .widgets import BIG, NORMAL, SMALL, H, W, bar, header, label_value, page_dots, status_tag, text_center, text_right
 
 
@@ -166,6 +167,10 @@ STATUS_PAGES = [
     ("netzwerk", page_network),
     ("motoren", page_motors),
     ("system", page_system),
+    ("akku", page_battery),
+    ("rechner", page_computer),
+    ("temperatur", page_temperatures),
+    ("netz_io", page_net_io),
     ("feld", page_field),
     ("last", page_load),
     ("beinlast", page_load_history),

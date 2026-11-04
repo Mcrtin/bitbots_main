@@ -12,6 +12,7 @@ from collections import deque
 
 from transforms3d.euler import quat2euler
 
+from .local_hardware import LocalHardware
 from .state import Motor, RobotState, TopicStat
 from .state import Node as NodeStatus
 
@@ -97,6 +98,8 @@ HZ_WINDOW = 20  # Empfangszeiten je Topic fuer die Rate
 EFFORT_SAMPLE_S = 0.1  # ein Wert pro Zehntelsekunde fuer den Last-Verlauf
 EFFORT_HISTORY = 60  # 6 s
 POSE_TRAIL = 30
+HISTORY_S = 120  # Verlauf von CPU-Last und Akkuspannung, ein Wert je poll_hardware (1 s)
+BATTERY_TIMEOUT_S = 3.0
 
 
 class RosStatusSource:
@@ -132,6 +135,8 @@ class RosStatusSource:
         self._gc_diag_stamp = None
         self._strategy_action = "-"
         self._robot_state_text = None
+        self._hardware = LocalHardware()
+        self._local_hw = False  # True, sobald hardware_interfaces Werte liefert; dann zaehlt system_workload nicht
 
         s = self._state = RobotState()
         s.robot_name = socket.gethostname().split(".")[0].upper()[:8]
@@ -146,6 +151,9 @@ class RosStatusSource:
         s.ball_seen, s.teammates_seen = False, 0
         s.loc_confidence = None
         s.battery_voltage = s.battery_percent = None
+        s.battery_current_a = s.battery_temp_c = s.bms_error = s.battery_age_s = None
+        s.cpu_mhz = s.load_avg = s.uptime_s = s.ram_used_gb = s.ram_total_gb = s.disk_percent = None
+        s.temps, s.net_ifaces = [], []
         s.pose = None
         s.roll_deg = s.pitch_deg = 0.0
         s.cpu_percent = s.cpu_temp_c = s.ram_percent = None
@@ -190,6 +198,7 @@ class RosStatusSource:
             s.gc_connected = gc_age < GC_TIMEOUT_S or gc_diag_ok
             s.gc_age_s = min(gc_age, 99.9)
             s.ball_seen = now - self._stamps.get("ball", -1e9) < BALL_TIMEOUT_S
+            s.battery_age_s = now - self._stamps["battery"] if "battery" in self._stamps else None
             s.imu_ok = now - self._stamps.get("imu", -1e9) < IMU_TIMEOUT_S
             camera_ok = now - self._stamps.get("camera_info", -1e9) < CAMERA_TIMEOUT_S
             s.nodes = self._diag_groups[:5] + [NodeStatus("zed", camera_ok)]
@@ -312,6 +321,22 @@ class RosStatusSource:
             self._state.battery_voltage = v
             self._state.battery_percent = max(0.0, min(100.0, (v - self.battery_empty_v) / span * 100))
 
+    def on_battery_current(self, msg):
+        with self._lock:
+            self._touch("battery_current")
+            self._state.battery_current_a = float(msg.data)
+
+    def on_battery_temperature(self, msg):
+        with self._lock:
+            self._touch("battery_temperature")
+            self._state.battery_temp_c = float(msg.data)
+
+    # Fehlercode des BMS, 0 = kein Fehler
+    def on_bms_error(self, msg):
+        with self._lock:
+            self._touch("bms_error")
+            self._state.bms_error = int(msg.data)
+
     def on_imu(self, msg):
         q = msg.orientation
         roll, pitch, _ = quat2euler((q.w, q.x, q.y, q.z))
@@ -347,6 +372,8 @@ class RosStatusSource:
                 eth = ip
         with self._lock:
             self._touch("workload")
+            if self._local_hw:
+                return  # dieselben Werte kommen schon lokal aus hardware_interfaces
             s = self._state
             s.cpu_percent = int(msg.cpu_usage_overall)
             if msg.memory_total:
@@ -391,6 +418,31 @@ class RosStatusSource:
                 self._state.cpu_temp_c = temp
             self._state.ssid = ssid or "-"
             self._state.wifi_rssi = rssi
+
+    # Rechner-Werte aus hardware_interfaces und je Sekunde ein Verlaufswert; laeuft im 1-s-Timer von StatusDisplay
+    def poll_hardware(self):
+        hw = self._hardware.poll()  # liest Dateien, daher ausserhalb des Locks
+        now = self.clock()
+        with self._lock:
+            s = self._state
+            if hw.cpu_percent is not None or hw.ram_percent is not None:
+                self._local_hw = True
+            if self._local_hw:
+                s.cpu_percent = None if hw.cpu_percent is None else round(hw.cpu_percent)
+                s.ram_percent = None if hw.ram_percent is None else round(hw.ram_percent)
+                wlan = next((n.ip for n in hw.net if n.ip and n.name.startswith("wl")), None)
+                eth = next((n.ip for n in hw.net if n.ip and n.name.startswith("e")), None)
+                s.wlan_ip, s.eth_ip = wlan or "-", eth or "-"
+            s.cpu_mhz, s.load_avg, s.uptime_s = hw.cpu_mhz, hw.load_avg, hw.uptime_s
+            s.ram_used_gb, s.ram_total_gb = hw.ram_used_gb, hw.ram_total_gb
+            s.disk_percent = None if hw.disk_percent is None else round(hw.disk_percent)
+            s.temps, s.net_ifaces = hw.temps, hw.net
+            if hw.cpu_percent is not None:
+                s.cpu_history.append(hw.cpu_percent)
+                del s.cpu_history[:-HISTORY_S]
+            if s.battery_voltage is not None and now - self._stamps.get("battery", -1e9) < BATTERY_TIMEOUT_S:
+                s.battery_history.append(s.battery_voltage)
+                del s.battery_history[:-HISTORY_S]
 
 
 # DiagnosticStatus.level ist in rclpy ein bytes-Objekt der Laenge 1

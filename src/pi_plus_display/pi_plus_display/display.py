@@ -10,6 +10,7 @@ from sensor_msgs.msg import CameraInfo
 from bitbots_msgs.msg import RobotControlState, Workload
 from game_controller_hsl_interfaces.msg import GameState
 from sensor_msgs.msg import Imu
+from std_msgs.msg import Int8
 
 from pi_plus_display.status_display import StatusDisplay
 
@@ -79,6 +80,14 @@ class MyNode(Node):
         self.create_subscription(Imu, "imu/data", display.on_imu, 1)
         self.create_subscription(Workload, "system_workload", display.on_workload, 1)
         self.create_subscription(TeamData, "team_data", display.on_team_data, 1)
+        # Akku-Werte aus livelybot_power (power_node), neben battery_voltage oben
+        self.create_subscription(
+            Float32, "battery_current", display.on_battery_current, 1
+        )
+        self.create_subscription(
+            Float32, "battery_temperature", display.on_battery_temperature, 1
+        )
+        self.create_subscription(Int8, "bms_error", display.on_bms_error, 1)
 
         # Create timer
         self.timer = self.create_timer(0.5, self.timer_callback)

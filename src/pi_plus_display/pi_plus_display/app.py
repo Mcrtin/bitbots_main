@@ -119,6 +119,8 @@ class DisplayApp:
             and s.battery_percent < LOW_BATTERY_PERCENT <= p.battery_percent
         ):
             self.alarm = ("AKKU", f"{s.battery_voltage:.1f} V", "bitte laden")
+        if s.bms_error and not p.bms_error:
+            self.alarm = ("AKKU", f"BMS-Fehler {s.bms_error}", "Akku pruefen")
 
     # ------------------------------------------------------------- Rendern
 

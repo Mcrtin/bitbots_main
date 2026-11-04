@@ -130,7 +130,7 @@ def main():
     start = events[0][0]
     span = events[-1][0] - start + 0.1  # Abstand zwischen zwei Durchlaeufen
     t0 = time.monotonic()
-    pos = {"i": 0, "round": 0, "last": t0}
+    pos = {"i": 0, "round": 0, "last": t0, "poll": t0 - 1.0}
     source = RosStatusSource(clock=lambda: time.monotonic() - t0)
     source._state.robot_name = "LOG"
     app = DisplayApp(source)
@@ -143,6 +143,10 @@ def main():
             pos["i"] += 1
             if pos["i"] == len(events):
                 pos["i"], pos["round"] = 0, pos["round"] + 1
+        if now - pos["poll"] >= 1.0:  # wie die Timer in StatusDisplay: Rechner-Werte dieses Rechners
+            source.poll_hardware()
+            source.poll_local()
+            pos["poll"] = now
         app.tick(now - pos["last"])
         pos["last"] = now
 

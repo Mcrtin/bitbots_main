@@ -56,6 +56,7 @@ class StatusDisplay:
         self._last_tick = time.monotonic()
         node.create_timer(1.0 / frame_rate, self._on_frame, clock=steady)
         node.create_timer(2.0, self.source.poll_local, clock=steady)
+        node.create_timer(1.0, self.source.poll_hardware, clock=steady)
 
     # bot_id und team_id vom parameter_blackboard, wie bitbots_team_communication
     def _read_game_settings(self):
