@@ -144,8 +144,6 @@ def pci_gpus():
     return result
 
 
-
-
 def ipv4_addresses():
     """Return IPv4 addresses for interfaces, where available."""
     result = {}
@@ -292,6 +290,7 @@ def proc_diagnostics():
 
     return result
 
+
 if __name__ == "__main__":
     print("CPU usage:", cpu_usage(), "%")
     print("CPU frequencies (MHz):", cpu_frequencies())
@@ -305,4 +304,3 @@ if __name__ == "__main__":
     print("IIO devices:", iio_devices())
     print("Hardware monitors:", hwmon_devices())
     print("Proc diagnostics:", proc_diagnostics())
-

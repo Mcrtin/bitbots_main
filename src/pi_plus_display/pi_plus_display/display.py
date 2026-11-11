@@ -13,35 +13,29 @@ from sensor_msgs.msg import Imu
 from std_msgs.msg import Int8
 
 from pi_plus_display.status_display import StatusDisplay
+import pi_plus_display.hardware_interfaces as hwif
 
 
 class MyNode(Node):
     def __init__(self):
         super().__init__("my_node")
-        self.get_logger().info("Activate sim time")
-        self.declare_parameter("demo", True)
+        self.demo = self.declare_parameter("demo", True).value
+        self.serial_port = self.declare_parameter("serial_port", "/dev/ttyS4").value
+        self.baudrate = self.declare_parameter("baudrate", 115200).value
+        self.frame_rate = self.declare_parameter("frame_rate", 10.0).value
         self.set_parameters(
             [
                 rclpy.parameter.Parameter(
                     "use_sim_time",
                     rclpy.Parameter.Type.BOOL,
-                    True,
-                ),
-                rclpy.parameter.Parameter(
-                    "demo",
-                    rclpy.Parameter.Type.BOOL,
-                    True,
+                    False,
                 ),
             ]
         )
 
-        demo = self.get_parameter("demo").get_parameter_value().bool_value
-
-        # Statusanzeige; die Callbacks unten reichen ihr jede Nachricht weiter
         self.status_display = StatusDisplay(self)
         display = self.status_display.source
-        if demo:
-            # Demo-Fenster mit Pfeiltasten als Joystick, faellt mit display_demo.py weg
+        if self.demo:
             from pi_plus_display.display_demo import start_window
 
             start_window(self, self.status_display)
@@ -56,6 +50,19 @@ class MyNode(Node):
         self.servo_diag_error = None
         self.imu_diag_error = None
 
+        self.cpu_usage = None
+        self.cpu_frequencies = None
+        self.memory = None
+        self.temperatures = None
+        self.block_devices = None
+        self.network_interfaces = None
+        self.ipv4_addresses = None
+        self.pci_gpus = None
+        self.power_supplies = None
+        self.iio_devices = None
+        self.hwmon_devices = None
+        self.proc_diagnostics = None
+
         self.create_subscription(Float32, "battery_voltage", self.voltage_cb, 1)
         self.create_subscription(DiagnosticArray, "diagnostics_agg", self.diag_cb, 1)
         self.create_subscription(JointState, "joint_states", self.joint_state_cb, 1)
@@ -66,31 +73,9 @@ class MyNode(Node):
         self.create_subscription(
             CameraInfo, "/zed/zed_node/rgb/camera_info", self.camera_info_callback, 1
         )
-        # Nur fuer die Statusanzeige, direkt an deren Callbacks
-        self.create_subscription(GameState, "gamestate", display.on_gamestate, 1)
-        self.create_subscription(
-            RobotControlState, "robot_state", display.on_robot_state, 1
-        )
-        self.create_subscription(
-            PoseWithCovarianceStamped,
-            "ball_position_relative_filtered",
-            display.on_ball,
-            1,
-        )
-        self.create_subscription(Imu, "imu/data", display.on_imu, 1)
-        self.create_subscription(Workload, "system_workload", display.on_workload, 1)
-        self.create_subscription(TeamData, "team_data", display.on_team_data, 1)
-        # Akku-Werte aus livelybot_power (power_node), neben battery_voltage oben
-        self.create_subscription(
-            Float32, "battery_current", display.on_battery_current, 1
-        )
-        self.create_subscription(
-            Float32, "battery_temperature", display.on_battery_temperature, 1
-        )
-        self.create_subscription(Int8, "bms_error", display.on_bms_error, 1)
 
         # Create timer
-        self.timer = self.create_timer(0.5, self.timer_callback)
+        self.create_timer(0.5, self.timer_callback)
         self.get_logger().info("Node initialized successfully.")
 
     def pose_cb(self, msg: PoseWithCovarianceStamped):
@@ -138,8 +123,18 @@ class MyNode(Node):
                 )
 
     def timer_callback(self):
-
-        self.get_logger().info("Timer callback executed.")
+        self.cpu_usage = hwif.cpu_usage()
+        self.cpu_frequencies = hwif.cpu_frequencies()
+        self.memory = hwif.memory()
+        self.temperatures = hwif.temperatures()
+        self.block_devices = hwif.block_devices()
+        self.network_interfaces = hwif.network_interfaces()
+        self.ipv4_addresses = hwif.ipv4_addresses()
+        self.pci_gpus = hwif.pci_gpus()
+        self.power_supplies = hwif.power_supplies()
+        self.iio_devices = hwif.iio_devices()
+        self.hwmon_devices = hwif.hwmon_devices()
+        self.proc_diagnostics = hwif.proc_diagnostics()
 
 
 def main(args=None):

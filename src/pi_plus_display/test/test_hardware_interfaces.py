@@ -42,13 +42,17 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertEqual(result["used_percent"], 60.0)
 
     def test_cpu_usage(self):
-        counters = iter([
-            [100, 0, 50, 800, 50, 0, 0, 0],
-            [120, 0, 60, 900, 60, 0, 0, 0],
-        ])
+        counters = iter(
+            [
+                [100, 0, 50, 800, 50, 0, 0, 0],
+                [120, 0, 60, 900, 60, 0, 0, 0],
+            ]
+        )
 
         with (
-            patch.object(hardware_interfaces, "cpu_counters", side_effect=lambda: next(counters)),
+            patch.object(
+                hardware_interfaces, "cpu_counters", side_effect=lambda: next(counters)
+            ),
             patch.object(hardware_interfaces.time, "sleep"),
         ):
             result = hardware_interfaces.cpu_usage(interval=0)
@@ -119,12 +123,15 @@ class DiagnosticsTests(unittest.TestCase):
         mock_socket.fileno.return_value = 7
 
         with (
-            patch.object(hardware_interfaces.socket, "if_nameindex",
-                         return_value=[(2, "eth0")]),
-            patch.object(hardware_interfaces.socket, "socket",
-                         return_value=mock_socket),
-            patch.object(hardware_interfaces.fcntl, "ioctl",
-                         return_value=bytes(response)),
+            patch.object(
+                hardware_interfaces.socket, "if_nameindex", return_value=[(2, "eth0")]
+            ),
+            patch.object(
+                hardware_interfaces.socket, "socket", return_value=mock_socket
+            ),
+            patch.object(
+                hardware_interfaces.fcntl, "ioctl", return_value=bytes(response)
+            ),
         ):
             result = hardware_interfaces.ipv4_addresses()
 
@@ -152,9 +159,7 @@ class DiagnosticsTests(unittest.TestCase):
 
         self.assertEqual(result["iio:device0"]["name"], "test_imu")
         self.assertEqual(result["iio:device0"]["in_accel_x_raw"], "123")
-        self.assertEqual(
-            result["iio:device0"]["scan_elements"]["in_accel_x_en"], "1"
-        )
+        self.assertEqual(result["iio:device0"]["scan_elements"]["in_accel_x_en"], "1")
 
     def test_hwmon_devices(self):
         base = self.sys / "class/hwmon/hwmon0"
@@ -165,12 +170,8 @@ class DiagnosticsTests(unittest.TestCase):
         result = hardware_interfaces.hwmon_devices()
 
         self.assertEqual(result["hwmon0"]["name"], "test_sensor")
-        self.assertEqual(
-            result["hwmon0"]["attributes"]["temp1_input"], "42000"
-        )
-        self.assertEqual(
-            result["hwmon0"]["attributes"]["temp1_label"], "CPU"
-        )
+        self.assertEqual(result["hwmon0"]["attributes"]["temp1_input"], "42000")
+        self.assertEqual(result["hwmon0"]["attributes"]["temp1_label"], "CPU")
 
     def test_proc_diagnostics(self):
         self.write(self.proc / "uptime", "123.45 67.89\n")
@@ -186,6 +187,7 @@ class DiagnosticsTests(unittest.TestCase):
         self.assertEqual(result["loadavg"], "0.10 0.20 0.30 1/100 1234")
         self.assertIn("cpu", result["pressure"])
         self.assertIn("avg10=0.00", result["pressure"]["cpu"])
+
 
 if __name__ == "__main__":
     unittest.main()
