@@ -86,32 +86,17 @@ def battery(draw, x, y, percent, fill=1):
         draw.rectangle((sx, y + 2, sx, y + 4), fill=fill)
 
 
-# Vier Balken 7x7 px. None = keine Verbindung (durchgestrichen)
-def wifi(draw, x, y, rssi_dbm, fill=1):
-    if rssi_dbm is None:
-        draw.line((x, y, x + 6, y + 6), fill=fill)
-        draw.line((x, y + 6, x + 6, y), fill=fill)
-        return
-    bars = 4 if rssi_dbm > -55 else 3 if rssi_dbm > -65 else 2 if rssi_dbm > -75 else 1
-    for i in range(4):
-        bx = x + i * 2
-        top = y + 6 - (i + 1) * 3 // 2
-        if i < bars:
-            draw.line((bx, top, bx, y + 6), fill=fill)
-        else:
-            draw.point((bx, y + 6), fill=fill)
-
-
 # Kopfzeile: links Robotername + Seitentitel, rechts WLAN + Akku + Prozent.
 # Bewusst nicht invertiert: grosse, dauerhaft leuchtende Flaechen brennen
 # beim OLED schneller ein.
 def header(draw, left, state, fill=1):
-    NORMAL.draw(draw, (0, 0), left, fill)
+
+    NORMAL.draw(draw, (0, 0), state.wlan_ip, fill)
+    NORMAL.draw(draw, (NORMAL.width(state.wlan_ip) + 2, 0), left, fill)
     xr = W - 1
-    battery(draw, xr - 12, 0, state.battery_percent, fill)
-    pct = "--%" if state.battery_percent is None else f"{state.battery_percent:d}%"
-    text_right(draw, xr - 16, 0, pct, NORMAL, fill)
-    wifi(draw, xr - 16 - NORMAL.width(pct) - 10, 0, state.wifi_rssi, fill)
+    bat = None if state.battery_percent is None else min(state.battery_percent, 99)
+    battery(draw, xr - 12, 0, bat, fill)
+    text_right(draw, xr - 14, 0, "--" if bat is None else f"{bat:d}", NORMAL, fill)
     draw.line((0, HEADER_H, W - 1, HEADER_H), fill=fill)
 
 

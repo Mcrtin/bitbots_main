@@ -114,9 +114,10 @@ def page_behavior(draw, s):
     header(draw, _who(s), s)
     SMALL.draw(draw, (0, 17), "ROLLE")
     BIG.draw(draw, (26, 12), s.role)
-    label_value(draw, 30, "TUT", s.action, x_value=26)
-    ball = f"{s.ball_dist_m:.1f} m" if s.ball_seen else "nicht gesehen"
-    label_value(draw, 40, "BALL", ball, x_value=26)
+    label_value(draw, 30, "ACT.", s.action, x_value=26)
+    gc = "connceted" if s.gc_connected else "disconnected"
+    label_value(draw, 40, "GC.", gc, x_value=26)
+    #TODO: move
     SMALL.draw(draw, (0, 51), "LOK.")
     bar(draw, 26, 50, 70, 7, s.loc_confidence or 0.0)
     text_right(
@@ -129,7 +130,7 @@ def page_behavior(draw, s):
 
 # Seite 2: Netzwerk. IP sofort ablesbar, ohne Monitor oder Scan
 def page_network(draw, s):
-    header(draw, "NETZWERK", s)
+    header(draw, "NETZ", s)
     label_value(draw, 12, "WLAN", s.wlan_ip, x_value=26)
     rssi = f"{s.wifi_rssi} dBm" if s.wifi_rssi is not None else "getrennt"
     text_right(draw, W - 1, 12, rssi, SMALL)
@@ -349,7 +350,7 @@ def page_load_history(draw, s):
 
 # Seite DATENFLUSS: Empfangsrate je Topic, fehlende Topics zusammengefasst
 def page_topics(draw, s):
-    header(draw, "DATENFLUSS", s)
+    header(draw, "DATENF.", s)
     received = [t for t in s.topics if t.age_s is not None]
     missing = [t for t in s.topics if t.age_s is None]
     for i, t in enumerate(received[:5]):

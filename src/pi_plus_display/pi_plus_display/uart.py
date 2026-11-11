@@ -53,6 +53,7 @@ def joystick_events(frames):
 
 class StatusBoardUart:
     def __init__(self, port, baudrate):
+        #TODO: no module named serial
         import serial  # pyserial, erst hier importiert, damit Tests ohne Platine laufen
 
         self.ser = serial.Serial(port, baudrate, timeout=0, write_timeout=0.1)

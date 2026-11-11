@@ -27,8 +27,7 @@ class DisplayApp:
         self._prev = None  # letzter Zustand, um neue Fehler zu erkennen
 
     def joystick(self, key):
-        if self.alarm:
-            self.alarm = None
+        self.alarm = None
         n = len(STATUS_PAGES)
         if key == "left":
             self.page = (self.page - 1) % n
