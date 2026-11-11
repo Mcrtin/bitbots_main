@@ -86,7 +86,9 @@ def run_window(title, get_image, on_key, on_tick=None):
         img = get_image()
         if img is not None and img is not ui["img"]:
             big = img.convert("L").resize((W * SCALE, H * SCALE), Image.NEAREST)
-            ui["img"], ui["photo"] = img, ImageTk.PhotoImage(big)  # Referenz halten, sonst verschwindet das Bild
+            ui["img"], ui["photo"] = img, ImageTk.PhotoImage(
+                big
+            )  # Referenz halten, sonst verschwindet das Bild
             ui["view"].configure(image=ui["photo"], width=W * SCALE, height=H * SCALE)
         ui["root"].after(REFRESH_MS, refresh)
 
@@ -106,52 +108,20 @@ def start_window(node, status_display):
 
     def run():
         try:
-            run_window(f"Statusdisplay {node.get_name()} (Demo)", lambda: board.image, board.keys.put)
-        except Exception as e:  # kein Bildschirm (DISPLAY fehlt) oder kein tkinter: ohne Fenster weiterlaufen
+            run_window(
+                f"Statusdisplay {node.get_name()} (Demo)",
+                lambda: board.image,
+                board.keys.put,
+            )
+        except (
+            Exception
+        ) as e:  # kein Bildschirm (DISPLAY fehlt) oder kein tkinter: ohne Fenster weiterlaufen
             status_display.uart = board.board
-            node.get_logger().error(f"Demo-Fenster laesst sich nicht oeffnen, es laeuft ohne: {e}")
+            node.get_logger().error(
+                f"Demo-Fenster laesst sich nicht oeffnen, es laeuft ohne: {e}"
+            )
             return
         _thread.interrupt_main()
 
     threading.Thread(target=run, name="display_demo", daemon=True).start()
 
-
-# Ohne ROS: spielt das Log in Echtzeit im Kreis ab und zeigt die Seiten im Fenster
-def main():
-    from .app import DisplayApp
-    from .log_replay import LogReplay
-    from .ros_source import RosStatusSource
-
-    ap = argparse.ArgumentParser(description="Statusanzeige im Fenster, Daten aus einem Log von display.py")
-    ap.add_argument("log", help="Log mit msg=...-Zeilen, z. B. node_output.txt")
-    args = ap.parse_args()
-
-    events = LogReplay(args.log).events
-    start = events[0][0]
-    span = events[-1][0] - start + 0.1  # Abstand zwischen zwei Durchlaeufen
-    t0 = time.monotonic()
-    pos = {"i": 0, "round": 0, "last": t0, "poll": t0 - 1.0}
-    source = RosStatusSource(clock=lambda: time.monotonic() - t0)
-    source._state.robot_name = "LOG"
-    app = DisplayApp(source)
-
-    def tick():
-        now = time.monotonic()
-        while (events[pos["i"]][0] - start) + pos["round"] * span <= now - t0:
-            _, handler, msg = events[pos["i"]]
-            getattr(source, handler)(msg)
-            pos["i"] += 1
-            if pos["i"] == len(events):
-                pos["i"], pos["round"] = 0, pos["round"] + 1
-        if now - pos["poll"] >= 1.0:  # wie die Timer in StatusDisplay: Rechner-Werte dieses Rechners
-            source.poll_hardware()
-            source.poll_local()
-            pos["poll"] = now
-        app.tick(now - pos["last"])
-        pos["last"] = now
-
-    run_window(f"Statusdisplay (Demo, {args.log})", app.render, app.joystick, on_tick=tick)
-
-
-if __name__ == "__main__":
-    main()
