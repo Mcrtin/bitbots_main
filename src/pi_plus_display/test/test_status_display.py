@@ -79,7 +79,7 @@ def test_callbacks_fill_state():
     assert s.role == "STURM" and s.action == "Ball anlaufen"
     assert s.battery_percent == 100
     assert abs(s.roll_deg - 90) < 1e-6 and abs(s.pitch_deg) < 1e-6
-    assert s.ball_seen and s.ball_dist_m == 5.0
+    assert any(t.name == "BALL" and t.age_s is not None for t in s.topics)
     assert s.player_number == 2
     src.on_robot_state(v(state=2))
     assert src.snapshot().action == "Gefallen"
@@ -118,37 +118,3 @@ def test_diagnostics_groups_and_motors():
     assert src.snapshot().nodes[-1].ok
     img = render_status(s, 3)  # Motorseite mit Fehlertext
     assert img.getbbox() is not None
-
-
-_LOG = """\
-[INFO] [my_node]: msg=sensor_msgs.msg.JointState(header=std_msgs.msg.Header(\
-stamp=builtin_interfaces.msg.Time(sec=1, nanosec=0), frame_id=''), name=['l_hip_pitch_joint', 'head_yaw_joint'], \
-position=[0.1, 0.0], velocity=[0.0, 0.0], effort=[-12.5, 0.3]) (joint_state_cb() at display.py:40)
-[INFO] [my_node]: msg=geometry_msgs.msg.PoseWithCovarianceStamped(header=std_msgs.msg.Header(\
-stamp=builtin_interfaces.msg.Time(sec=1, nanosec=500000000), frame_id='map'), \
-pose=geometry_msgs.msg.PoseWithCovariance(pose=geometry_msgs.msg.Pose(\
-position=geometry_msgs.msg.Point(x=-2.0, y=1.0, z=0.0), \
-orientation=geometry_msgs.msg.Quaternion(x=0.0, y=0.0, z=0.0, w=1.0)), covariance=array([0.01, 0. , 0. , 0. , 0. , 0. ,
-       0. , 0.01, 0. , 0. , 0. , 0. , 0. , 0. , 0. , 0. , 0. , 0. , 0. , 0. , 0. , 0. , 0. , 0. ,
-       0. , 0. , 0. , 0. , 0. , 0. , 0. , 0. , 0. , 0. , 0. , 0.01]))) (pose_cb() at display.py:52)
-[INFO] [my_node]: kein msg-Eintrag (other_cb() at display.py:60)
-"""
-
-
-def test_log_replay_fills_all_pages(tmp_path):
-    from pi_plus_display.log_replay import LogReplay
-
-    log = tmp_path / "node_output.txt"
-    log.write_text(_LOG)
-    replay = LogReplay(log)
-    assert [h for _, h, _ in replay.events] == ["on_joint_states", "on_pose"]
-    replay.advance_to(replay.end)
-    replay.source.update(0.1)
-    s = replay.source.snapshot()
-    assert s.pose is not None and s.pose[:2] == (-2.0, 1.0)
-    efforts = {m.name: m.effort_nm for m in s.motors}
-    assert efforts[next(n for n in efforts if n.startswith("l-hip"))] == -12.5
-    for i in range(len(STATUS_PAGES)):
-        img = render_status(s, i)
-        assert img.size == (128, 64)
-        assert img.getbbox() is not None

@@ -5,7 +5,6 @@
 import copy
 import math
 import socket
-import subprocess
 import threading
 import time
 from collections import deque
@@ -41,34 +40,8 @@ ROBOT_STATE_TEXT = {
     13: "Hardwarefehler",
     14: "Hochgehoben",
 }
-GAME_STATE_NAMES = {0: "INITIAL", 1: "READY", 2: "SET", 3: "PLAYING", 4: "FINISHED"}
-GAME_PHASE_TEXT = {1: "ELFMETERSCHIESSEN", 2: "VERLAENGERUNG", 3: "TIMEOUT"}
-SET_PLAY_TEXT = {
-    1: "FREISTOSS DIREKT",
-    2: "FREISTOSS INDIR.",
-    3: "ELFMETER",
-    4: "EINWURF",
-    5: "ABSTOSS",
-    6: "ECKE",
-}
-PENALTY_NAMES = {
-    1: "POSITION",
-    2: "MOTION SET",
-    3: "MOTION STOP",
-    4: "GAME STUCK",
-    5: "INCAPABLE",
-    6: "PICK UP",
-    7: "BALL HOLD",
-    8: "LEAVING",
-    9: "ARMS/HANDS",
-    10: "PUSHING",
-    11: "VERWARNT",
-    12: "PLATZVERWEIS",
-    13: "AUSWECHSEL",
-}
 
 GC_TIMEOUT_S = 3.0
-BALL_TIMEOUT_S = 2.0
 IMU_TIMEOUT_S = 1.0
 CAMERA_TIMEOUT_S = 1.0
 
@@ -77,7 +50,6 @@ CAMERA_TIMEOUT_S = 1.0
 LEG_JOINTS = ["hip_pitch", "hip_roll", "thigh", "calf", "ankle_pitch", "ankle_roll"]
 # Meldungen aus robot::motorDiagnostic (livelybot_serial) -> kurzer Text fuer die Anzeige
 MOTOR_MESSAGES = {"No CAN data": "KEINE ANTW."}
-TEAM_TIMEOUT_S = 5.0
 JOINT_TIMEOUT_S = 0.5
 # Datenfluss-Seite: Kurzname je Topic-Schluessel, in dieser Reihenfolge wenn gleich schnell
 TOPIC_LABELS = {
@@ -98,8 +70,6 @@ HZ_WINDOW = 20  # Empfangszeiten je Topic fuer die Rate
 EFFORT_SAMPLE_S = 0.1  # ein Wert pro Zehntelsekunde fuer den Last-Verlauf
 EFFORT_HISTORY = 60  # 6 s
 POSE_TRAIL = 30
-HISTORY_S = 120  # Verlauf von CPU-Last und Akkuspannung, ein Wert je poll_hardware (1 s)
-BATTERY_TIMEOUT_S = 3.0
 
 
 class RosStatusSource:
@@ -124,7 +94,6 @@ class RosStatusSource:
         self.battery_full_v = battery_full_v
         self._lock = threading.Lock()
         self._stamps = {}  # Topic-Schluessel -> Empfangszeit (monotonic)
-        self._teammates = {}  # robot_id -> Empfangszeit
         self._diag_groups = []  # NodeStatus der Diagnose-Gruppen, ohne Kamera
         self._recv = {}  # Topic-Schluessel -> deque der letzten Empfangszeiten
         self._diag_motors = {}  # Gelenkname -> (ok, Fehlertext) aus .../Servos/<joint>
@@ -132,7 +101,7 @@ class RosStatusSource:
         self._efforts = {}  # Gelenkname -> Drehmoment [Nm]
         self._leg_peak = None  # hoechste Bein-Last seit dem letzten Verlaufswert
         self._last_effort_sample = None
-        self._gc_diag_stamp = None
+        self._gc_diag = ""  # Meldung der Diagnose "/Robot/Other/Game Controller", z. B. "Connected"
         self._strategy_action = "-"
         self._robot_state_text = None
         self._hardware = LocalHardware()
@@ -142,24 +111,19 @@ class RosStatusSource:
         s.robot_name = socket.gethostname().split(".")[0].upper()[:8]
         if player_number is not None:
             s.player_number = player_number
-        s.opp_name = "GEGNER"
         # Testwerte aus RobotState leeren, bis echte Nachrichten kommen; Unbekanntes ist None,
-        # nur Spielstand, Zeit und Lage stehen bis zur ersten Nachricht auf 0
+        # nur die Lage steht bis zur ersten Nachricht auf 0
         s.action = "warte auf Daten"
-        s.game_state = s.role = "-"
-        s.seconds_remaining = s.score_own = s.score_opp = 0
-        s.ball_seen, s.teammates_seen = False, 0
+        s.role = "-"
+        s.gc_connected = False
         s.loc_confidence = None
         s.battery_voltage = s.battery_percent = None
-        s.battery_current_a = s.battery_temp_c = s.bms_error = s.battery_age_s = None
-        s.cpu_mhz = s.load_avg = s.uptime_s = s.ram_used_gb = s.ram_total_gb = s.disk_percent = None
-        s.temps, s.net_ifaces = [], []
+        s.battery_current_a = s.battery_temp_c = s.bms_error = None
+        s.net_ifaces = []
         s.pose = None
         s.roll_deg = s.pitch_deg = 0.0
         s.cpu_percent = s.cpu_temp_c = s.ram_percent = None
-        s.kickoff_own = None
-        s.gc_connected = False
-        s.wlan_ip = s.eth_ip = s.ssid = "-"
+        s.wlan_ip = "-"
         s.wifi_rssi = None
         s.motors, s.nodes = [], []
 
@@ -180,6 +144,7 @@ class RosStatusSource:
         with self._lock:
             self._state.role = role
 
+    # Spielernummer, sobald das parameter_blackboard antwortet (StatusDisplay)
     def set_player_number(self, number):
         with self._lock:
             self._state.player_number = number
@@ -192,19 +157,12 @@ class RosStatusSource:
         now = self.clock()
         with self._lock:
             s = self._state
-            gc_age = now - self._stamps.get("gamestate", -1e9)
-            # Ohne gamestate (z. B. Node abonniert es nicht) zaehlt die Diagnose des GC-Clients
-            gc_diag_ok = s.gc_diag == "Connected" and now - self._stamps.get("diagnostics", -1e9) < GC_TIMEOUT_S
-            s.gc_connected = gc_age < GC_TIMEOUT_S or gc_diag_ok
-            s.gc_age_s = min(gc_age, 99.9)
-            s.ball_seen = now - self._stamps.get("ball", -1e9) < BALL_TIMEOUT_S
-            s.battery_age_s = now - self._stamps["battery"] if "battery" in self._stamps else None
+            # Ohne gamestate (display.py abonniert es nicht) zaehlt die Diagnose des GC-Clients
+            gc_diag_ok = self._gc_diag == "Connected" and now - self._stamps.get("diagnostics", -1e9) < GC_TIMEOUT_S
+            s.gc_connected = now - self._stamps.get("gamestate", -1e9) < GC_TIMEOUT_S or gc_diag_ok
             s.imu_ok = now - self._stamps.get("imu", -1e9) < IMU_TIMEOUT_S
             camera_ok = now - self._stamps.get("camera_info", -1e9) < CAMERA_TIMEOUT_S
             s.nodes = self._diag_groups[:5] + [NodeStatus("zed", camera_ok)]
-            s.teammates_seen = sum(1 for t in self._teammates.values() if now - t < TEAM_TIMEOUT_S)
-            if s.penalty and s.penalty_seconds > 0:
-                s.penalty_seconds = max(0, s.penalty_seconds - dt)
             s.motors = self._build_motors(now)
             self._sample_effort(now)
             s.topics = self._topic_stats(now)
@@ -254,26 +212,10 @@ class RosStatusSource:
 
     # ------------------------------------------------------------- Callbacks
 
+    # Nur fuer die GC-Verbindung und die Datenfluss-Seite; Spielstand und Strafen zeigt keine Seite
     def on_gamestate(self, msg):
         with self._lock:
-            s = self._state
             self._touch("gamestate")
-            s.game_state = GAME_STATE_NAMES.get(msg.main_state, "?")
-            s.half = 1 if msg.first_half else 2
-            s.seconds_remaining = max(0, msg.seconds_remaining)
-            s.score_own, s.score_opp = msg.own_score, msg.rival_score
-            if self.team_id is not None:
-                s.kickoff_own = msg.kicking_team == self.team_id
-            s.secondary_state = GAME_PHASE_TEXT.get(msg.game_phase) or SET_PLAY_TEXT.get(msg.set_play, "")
-            if msg.stopped:
-                s.secondary_state = "SPIEL GESTOPPT"
-            if msg.penalized:
-                s.penalty = PENALTY_NAMES.get(msg.penalty, "STRAFE")
-                s.penalty_seconds = msg.seconds_till_unpenalized
-            else:
-                s.penalty, s.penalty_seconds = "", 0
-            if msg.players_per_team:
-                s.teammates_total = max(1, msg.players_per_team - 1)
 
     def on_strategy(self, msg):
         with self._lock:
@@ -292,11 +234,10 @@ class RosStatusSource:
         # Zustand der Hardware (gefallen, Motoren aus) geht vor der Verhaltensaktion
         self._state.action = self._robot_state_text or self._strategy_action
 
+    # Nur fuer die Datenfluss-Seite (Rate von "BALL"); die Entfernung zeigt keine Seite mehr
     def on_ball(self, msg):
-        p = msg.pose.pose.position
         with self._lock:
             self._touch("ball")
-            self._state.ball_dist_m = math.hypot(p.x, p.y)
 
     def on_pose(self, msg):
         p, q = msg.pose.pose.position, msg.pose.pose.orientation
@@ -361,15 +302,12 @@ class RosStatusSource:
                 self._leg_peak = max(legs) if self._leg_peak is None else max(self._leg_peak, max(legs))
 
     def on_workload(self, msg):
-        wlan = eth = None
+        wlan = None
         for iface in msg.network_interfaces:
             ip = next((a for a in iface.ip_addresses if ":" not in a), None)
-            if not ip:
-                continue
-            if iface.name.startswith("wl") and wlan is None:
+            if ip and iface.name.startswith("wl"):
                 wlan = ip
-            elif iface.name.startswith("e") and eth is None:
-                eth = ip
+                break
         with self._lock:
             self._touch("workload")
             if self._local_hw:
@@ -379,7 +317,6 @@ class RosStatusSource:
             if msg.memory_total:
                 s.ram_percent = int(100 * msg.memory_used / msg.memory_total)
             s.wlan_ip = wlan or "-"
-            s.eth_ip = eth or "-"
 
     # Gruppen des Diagnostic Aggregators und je Motor ein Eintrag unter .../Servos/<joint>.
     # Der Aggregator haengt alles unter einen Wurzelpfad ("/Robot", siehe bitbots_diagnostic/config).
@@ -401,28 +338,25 @@ class RosStatusSource:
             self._touch("diagnostics")
             self._diag_groups = groups
             self._diag_motors = motors
-            self._state.gc_diag = gc
+            self._gc_diag = gc
 
+    # Nur fuer die Datenfluss-Seite (Rate von "TEAM")
     def on_team_data(self, msg):
         with self._lock:
             self._touch("team_data")
-            if msg.robot_id != self._state.player_number:
-                self._teammates[msg.robot_id] = self.clock()
 
-    # Werte, die es nicht als Topic gibt: CPU-Temperatur, WLAN-Name und -Signal
+    # Werte, die es nicht als Topic gibt: CPU-Temperatur und WLAN-Signal
     def poll_local(self):
         temp = _read_cpu_temp()
-        ssid, rssi = _read_wifi()
+        rssi = _read_wifi_rssi()
         with self._lock:
             if temp is not None:
                 self._state.cpu_temp_c = temp
-            self._state.ssid = ssid or "-"
             self._state.wifi_rssi = rssi
 
-    # Rechner-Werte aus hardware_interfaces und je Sekunde ein Verlaufswert; laeuft im 1-s-Timer von StatusDisplay
+    # Rechner-Werte aus hardware_interfaces; laeuft im 1-s-Timer von StatusDisplay
     def poll_hardware(self):
         hw = self._hardware.poll()  # liest Dateien, daher ausserhalb des Locks
-        now = self.clock()
         with self._lock:
             s = self._state
             if hw.cpu_percent is not None or hw.ram_percent is not None:
@@ -431,18 +365,8 @@ class RosStatusSource:
                 s.cpu_percent = None if hw.cpu_percent is None else round(hw.cpu_percent)
                 s.ram_percent = None if hw.ram_percent is None else round(hw.ram_percent)
                 wlan = next((n.ip for n in hw.net if n.ip and n.name.startswith("wl")), None)
-                eth = next((n.ip for n in hw.net if n.ip and n.name.startswith("e")), None)
-                s.wlan_ip, s.eth_ip = wlan or "-", eth or "-"
-            s.cpu_mhz, s.load_avg, s.uptime_s = hw.cpu_mhz, hw.load_avg, hw.uptime_s
-            s.ram_used_gb, s.ram_total_gb = hw.ram_used_gb, hw.ram_total_gb
-            s.disk_percent = None if hw.disk_percent is None else round(hw.disk_percent)
-            s.temps, s.net_ifaces = hw.temps, hw.net
-            if hw.cpu_percent is not None:
-                s.cpu_history.append(hw.cpu_percent)
-                del s.cpu_history[:-HISTORY_S]
-            if s.battery_voltage is not None and now - self._stamps.get("battery", -1e9) < BATTERY_TIMEOUT_S:
-                s.battery_history.append(s.battery_voltage)
-                del s.battery_history[:-HISTORY_S]
+                s.wlan_ip = wlan or "-"
+            s.net_ifaces = hw.net
 
 
 # DiagnosticStatus.level ist in rclpy ein bytes-Objekt der Laenge 1
@@ -483,19 +407,12 @@ def _read_cpu_temp():
         return None
 
 
-# (SSID, RSSI in dBm) ueber /proc/net/wireless und iwgetid, sonst (None, None)
-def _read_wifi():
-    rssi = None
+# WLAN-Signal in dBm aus /proc/net/wireless, sonst None
+def _read_wifi_rssi():
     try:
         with open("/proc/net/wireless") as f:
             for line in f.readlines()[2:]:
-                parts = line.split()
-                rssi = int(float(parts[3].rstrip(".")))
-                break
+                return int(float(line.split()[3].rstrip(".")))
     except (OSError, ValueError, IndexError):
         pass
-    try:
-        ssid = subprocess.run(["iwgetid", "-r"], capture_output=True, text=True, timeout=1).stdout.strip()
-    except (OSError, subprocess.SubprocessError):
-        ssid = None
-    return ssid or None, rssi
+    return None

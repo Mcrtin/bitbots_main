@@ -1,16 +1,12 @@
-# Tests fuer die Hardware-Seiten: LocalHardware auf einem nachgebauten /sys und /proc, Akku-Callbacks, Seiten
+# Tests fuer die Hardware-Werte: LocalHardware auf einem nachgebauten /sys und /proc, Akku-Callbacks, Alarme
 
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from pi_plus_display import hardware_interfaces
-from pi_plus_display.app import DisplayApp, _display_values
+from pi_plus_display.app import DisplayApp
 from pi_plus_display.local_hardware import LocalHardware
-from pi_plus_display.pages import STATUS_PAGES, render_status
 from pi_plus_display.ros_source import RosStatusSource
-from pi_plus_display.widgets import W
-
-HW_PAGES = ["akku", "rechner", "temperatur", "netz_io"]
 
 
 def _write(path, text):
@@ -81,8 +77,9 @@ def test_poll_hardware_fills_state_and_overrides_workload(tmp_path):
         _fake_root(tmp_path, user=150, idle=850)
         src.poll_hardware()
     s = src.snapshot()
-    assert s.cpu_percent == 50 and s.cpu_history == [50.0]
-    assert s.wlan_ip == "172.20.1.13" and s.eth_ip == "-"
+    assert s.cpu_percent == 50 and s.ram_percent == 75
+    assert s.wlan_ip == "172.20.1.13"
+    assert [n.name for n in s.net_ifaces] == ["wlan0", "eth0"]
     workload = SimpleNamespace(cpu_usage_overall=99.0, memory_used=1, memory_total=1, network_interfaces=[])
     src.on_workload(workload)
     assert src.snapshot().cpu_percent == 50  # lokale Werte gelten weiter
@@ -99,28 +96,8 @@ def test_battery_topics_and_bms_alarm():
     app.tick(0.1)
     src.poll_hardware()
     s = src.snapshot()
-    assert (s.battery_current_a, s.battery_temp_c, s.bms_error) == (2.5, 33.0, 0)
-    assert s.battery_history == [23.7]
+    assert (s.battery_voltage, s.battery_current_a, s.battery_temp_c, s.bms_error) == (23.7, 2.5, 33.0, 0)
     assert app.alarm is None
     src.on_bms_error(v(data=3))
     app.tick(0.1)
-    assert app.alarm == ("AKKU", "BMS-Fehler 3", "Akku pruefen")
-
-
-def test_hardware_pages_render_without_data():
-    names = [n for n, _ in STATUS_PAGES]
-    s = _display_values(RosStatusSource().snapshot())
-    for name in HW_PAGES:
-        img = render_status(s, names.index(name))
-        assert img.size == (128, 64) and img.getbbox() is not None
-
-
-# Bei 2,5 % Last (Leerlauf auf einem Laptop) muss der CPU-Verlauf deutlich ueber der Grundlinie liegen
-def test_cpu_graph_visible_at_low_load():
-    from pi_plus_display.state import RobotState
-
-    s = RobotState()
-    s.cpu_history = [2.5] * 30
-    img = render_status(s, [n for n, _ in STATUS_PAGES].index("rechner"))
-    column = [img.getpixel((W - 1, y)) for y in range(22, 42)]
-    assert sum(1 for p in column if p) >= 4  # mindestens 4 px hoch
+    assert app.alarm[:3] == ("AKKU", "BMS-Fehler 3", "Akku pruefen")

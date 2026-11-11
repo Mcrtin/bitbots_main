@@ -13,7 +13,6 @@ from .pages import (
     render_alarm,
     render_status,
 )
-from .state import ROLES
 from .widgets import NORMAL, W, text_center
 
 LOW_BATTERY_PERCENT = 10
