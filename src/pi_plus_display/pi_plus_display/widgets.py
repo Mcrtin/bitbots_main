@@ -4,7 +4,9 @@ from luma.core.legacy import text as luma_text
 from luma.core.legacy import textsize as luma_textsize
 from luma.core.legacy.font import LCD_FONT, TINY_FONT, proportional, tolerant
 
-_UMLAUTE = str.maketrans({"ä": "ae", "ö": "oe", "ü": "ue", "Ä": "AE", "Ö": "OE", "Ü": "UE", "ß": "ss"})
+_UMLAUTE = str.maketrans(
+    {"ä": "ae", "ö": "oe", "ü": "ue", "Ä": "AE", "Ö": "OE", "Ü": "UE", "ß": "ss"}
+)
 
 
 class Font:
@@ -28,7 +30,13 @@ class Font:
         return max(0, w - 1) * self.scale  # ohne Abstand nach dem letzten Zeichen
 
     def draw(self, draw, xy, text, fill=1):  # zeichnet text; xy -> links oben
-        luma_text(_Scaled(draw, xy, self.scale), (0, -self.y_offset), self._prep(text), fill=fill, font=self.glyphs)
+        luma_text(
+            _Scaled(draw, xy, self.scale),
+            (0, -self.y_offset),
+            self._prep(text),
+            fill=fill,
+            font=self.glyphs,
+        )
 
 
 class _Scaled:
