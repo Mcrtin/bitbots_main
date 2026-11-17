@@ -1,7 +1,7 @@
-# Parameter der Statusanzeige (StatusDisplay in status_display.py), gelten fuer jede Node, die sie einbindet.
+# Parameter der Node (display.py)
 /**:
   ros__parameters:
-    display:
-      serial_port: /dev/ttyS4 # leer = keine Platine, nur rendern
-      baudrate: 115200
-      frame_rate: 10.0
+    demo: false # true = Fenster am Rechner statt der Platine (serial_port wird ignoriert); per Kommandozeile: --ros-args -p demo:=true
+    serial_port: /dev/ttyS4 # muss sich oeffnen lassen, sonst beendet sich die Node
+    baudrate: 115200
+    frame_rate: 10.0

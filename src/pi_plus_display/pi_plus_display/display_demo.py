@@ -1,19 +1,22 @@
 # Demo-Modus: zeigt die Statusanzeige in einem Fenster am Rechner, die Pfeiltasten wirken wie der Joystick der Platine.
+# Das Fenster sitzt anstelle der Platine am Ende des UART-Protokolls: es zeigt nur, was als Rahmen ankommt,
+# und die Tasten gehen als Joystick-Rahmen zurueck.
 # Nur zum Ausprobieren; zum Entfernen diese Datei loeschen und den Demo-Block in display.py.
-# Live mit ROS, Daten aus display.py: ros2 run pi_plus_display display (Parameter demo in display.py, derzeit fest auf true)
-# Ohne ROS, Log aus display.py im Kreis: python3 -m pi_plus_display.display_demo node_output.txt
+# Einschalten: ros2 run pi_plus_display display --ros-args -p demo:=true
 # Tasten: Pfeile = Joystick, Enter oder Leertaste = Mitte, Q oder Esc = Ende
 
 import _thread
-import argparse
 import gc
-import queue
 import threading
-import time
+from collections.abc import Callable
+from typing import Any
 
+from PIL import Image
+
+from .board import FramebufferReceiver, Key, joystick_frame
 from .widgets import H, W
 
-KEYS = {
+KEYS: dict[str, Key] = {
     "Up": "up",
     "Down": "down",
     "Left": "left",
@@ -26,44 +29,56 @@ SCALE = 6  # Fensterpixel pro Displaypixel
 REFRESH_MS = 50
 
 
-class WindowBoard:
-    # Steht in StatusDisplay an der Stelle der UART-Platine: merkt sich das letzte Bild fuers Fenster und liefert die Tasten;
-    # ist eine echte Platine offen, bekommt sie die Bilder weiterhin
+# Steht anstelle des seriellen Ports: nimmt die Rahmen entgegen und baut daraus das Bild nach,
+# Tasten kommen als Joystick-Rahmen zurueck
+class LoopbackSerial:
+    def __init__(self) -> None:
+        self._board = FramebufferReceiver()
+        self._rx = bytearray()  # Joystick-Rahmen vom Fenster
+        self._image: Image.Image | None = None
+        self._dirty = True
 
-    def __init__(self, board=None):
-        self.board = board
-        self.image = None
-        self.keys = queue.Queue()
+    def write(self, data: bytes, /) -> int:
+        self._board.feed(data)
+        self._dirty = True
+        return len(data)
 
-    def send_image(self, img):
-        self.image = img
-        return self.board.send_image(img) if self.board else 0
+    @property
+    def in_waiting(self) -> int:
+        return len(self._rx)
 
-    # Tasten aus dem Fenster und, falls vorhanden, vom Joystick der Platine
-    def read_keys(self):
-        keys = self.board.read_keys() if self.board else []
-        while not self.keys.empty():
-            keys.append(self.keys.get_nowait())
-        return keys
+    def read(self, n: int, /) -> bytes:
+        data = bytes(self._rx[:n])
+        del self._rx[:n]
+        return data
 
-    def resend_all(self):
-        if self.board:
-            self.board.resend_all()
+    def close(self) -> None:
+        pass
 
-    def close(self):
-        if self.board:
-            self.board.close()
+    def press(self, key: Key) -> None:
+        self._rx += joystick_frame(key)
+
+    # Immer dasselbe Objekt, bis sich das Bild aendert (das Fenster vergleicht per Identitaet)
+    def image(self) -> Image.Image:
+        if self._dirty or self._image is None:
+            self._dirty = False
+            self._image = self._board.image()
+        return self._image
 
 
 # Oeffnet das Fenster und blockiert, bis es geschlossen wird; get_image liefert das aktuelle Bild,
-# on_key bekommt "up", "down", "left", "right" oder "center", on_tick laeuft vor jedem Neuzeichnen
-def run_window(title, get_image, on_key, on_tick=None):
+# on_key bekommt "up", "down", "left", "right" oder "center"
+def run_window(
+    title: str,
+    get_image: Callable[[], Image.Image | None],
+    on_key: Callable[[Key], None],
+) -> None:
     import tkinter as tk
 
-    from PIL import Image, ImageTk
+    from PIL import ImageTk
 
     # Alle Tk-Objekte in ui, damit sie am Ende im selben Thread abgeraeumt werden koennen
-    ui = {"root": tk.Tk(), "img": None, "photo": None}
+    ui: dict[str, Any] = {"root": tk.Tk(), "img": None, "photo": None}
     root = ui["root"]
     root.title(title)
     root.configure(bg="black")
@@ -74,18 +89,16 @@ def run_window(title, get_image, on_key, on_tick=None):
     tk.Label(root, text=hint, fg="#8a8a8a", bg="black").pack(pady=(0, 12))
     del root
 
-    def key(event):
+    def key(event: Any) -> None:
         if event.keysym in ("q", "Q", "Escape"):
             ui["root"].destroy()
         elif event.keysym in KEYS:
             on_key(KEYS[event.keysym])
 
-    def refresh():
-        if on_tick:
-            on_tick()
+    def refresh() -> None:
         img = get_image()
         if img is not None and img is not ui["img"]:
-            big = img.convert("L").resize((W * SCALE, H * SCALE), Image.NEAREST)
+            big = img.convert("L").resize((W * SCALE, H * SCALE), Image.Resampling.NEAREST)
             ui["img"], ui["photo"] = img, ImageTk.PhotoImage(
                 big
             )  # Referenz halten, sonst verschwindet das Bild
@@ -100,28 +113,24 @@ def run_window(title, get_image, on_key, on_tick=None):
     gc.collect()
 
 
-# Haengt das Fenster an die StatusDisplay einer laufenden Node; das Fenster laeuft in einem eigenen Thread,
-# rclpy.spin bleibt im Hauptthread; Schliessen des Fensters beendet die Node wie Strg+C
-def start_window(node, status_display):
-    board = WindowBoard(status_display.uart)
-    status_display.uart = board
+# Prueft sofort, ob sich ein Fenster oeffnen laesst (tkinter vorhanden, Bildschirm erreichbar)
+def check_window() -> None:
+    try:
+        import tkinter
 
-    def run():
+        tkinter.Tk().destroy()
+    except Exception as e:
+        raise RuntimeError(f"Demo-Fenster laesst sich nicht oeffnen (tkinter, Bildschirm/DISPLAY?): {e}") from e
+
+
+# Haengt das Fenster an einen LoopbackSerial; es laeuft in einem eigenen Thread, rclpy.spin bleibt im Hauptthread;
+# Schliessen des Fensters beendet die Node wie Strg+C, ein Fehler im Fenster steht danach in node.fatal_error
+def start_window(node: Any, serial: LoopbackSerial) -> None:
+    def run() -> None:
         try:
-            run_window(
-                f"Statusdisplay {node.get_name()} (Demo)",
-                lambda: board.image,
-                board.keys.put,
-            )
-        except (
-            Exception
-        ) as e:  # kein Bildschirm (DISPLAY fehlt) oder kein tkinter: ohne Fenster weiterlaufen
-            status_display.uart = board.board
-            node.get_logger().error(
-                f"Demo-Fenster laesst sich nicht oeffnen, es laeuft ohne: {e}"
-            )
-            return
+            run_window(f"Statusdisplay {node.get_name()} (Demo)", serial.image, serial.press)
+        except Exception as e:
+            node.fatal_error = f"Demo-Fenster: {e}"
         _thread.interrupt_main()
 
     threading.Thread(target=run, name="display_demo", daemon=True).start()
-

@@ -1,306 +1,187 @@
-from pathlib import Path
-import time
+# Werte des Rechners, auf dem die Anzeige laeuft, aus /proc und /sys.
+# Nichts blockiert: CPU-Last und Netzraten kommen aus der Differenz zum vorigen Aufruf.
+# Ohne /proc (z. B. auf dem Mac) bleiben die Werte None bzw. leer.
+
 import fcntl
 import socket
 import struct
+import time
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
 
 SYS = Path("/sys")
 PROC = Path("/proc")
 
 
-def read_text(path):
-    try:
-        return path.read_text().strip()
-    except OSError:
-        return None
+# Netzwerk-Interface mit Datenrate
+@dataclass
+class NetIface:
+    name: str
+    up: bool = True
+    ip: str | None = None  # None = keine IPv4-Adresse (z. B. can0)
+    rx_bps: float | None = None  # Bytes pro Sekunde; None = erst ein Messwert
+    tx_bps: float | None = None
 
 
-def read_int(path):
+# Akku aus sysfs; None = der Akku meldet den Wert nicht
+@dataclass
+class Battery:
+    voltage_v: float | None = None
+    percent: int | None = None
+    current_a: float | None = None  # Betrag, die Richtung ist egal
+    temp_c: float | None = None
+
+    @property
+    def power_w(self) -> float | None:
+        return None if self.voltage_v is None or self.current_a is None else self.voltage_v * self.current_a
+
+
+def _read_int(path: Path) -> int | None:
     try:
         return int(path.read_text().strip())
     except (OSError, ValueError):
         return None
 
 
-def cpu_counters():
-    """Read aggregate CPU counters from /proc/stat."""
+def ram_percent() -> float | None:
     try:
-        fields = (PROC / "stat").read_text().splitlines()[0].split()
-        values = list(map(int, fields[1:]))
-        # user, nice, system, idle, iowait, irq, softirq, steal
-        values += [0] * (8 - len(values))
-        return values[:8]
-    except (OSError, ValueError, IndexError):
-        return None
-
-
-def cpu_usage(interval=0.5):
-    first = cpu_counters()
-    if first is None:
-        return None
-
-    time.sleep(interval)
-    second = cpu_counters()
-    if second is None:
-        return None
-
-    delta = [b - a for a, b in zip(first, second)]
-    total = sum(delta)
-    idle = delta[3] + delta[4]  # idle + iowait
-    return round(100 * (total - idle) / total, 1) if total else 0.0
-
-
-def memory():
-    values = {}
-    try:
+        values: dict[str, int] = {}
         for line in (PROC / "meminfo").read_text().splitlines():
             key, value = line.split(":", 1)
-            parts = value.split()
-            if parts and parts[0].isdigit():
-                values[key] = int(parts[0]) * 1024  # bytes
-    except OSError:
+            values[key] = int(value.split()[0])
+        return 100 * (values["MemTotal"] - values["MemAvailable"]) / values["MemTotal"]
+    except (OSError, ValueError, IndexError, KeyError, ZeroDivisionError):
         return None
 
-    total = values.get("MemTotal")
-    available = values.get("MemAvailable")
-    if total is None:
-        return None
 
-    used = total - available if available is not None else None
-    return {
-        "total_bytes": total,
-        "available_bytes": available,
-        "used_bytes": used,
-        "used_percent": round(100 * used / total, 1) if used is not None else None,
-    }
-
-
-def temperatures():
-    result = {}
-
-    # Thermal zones
-    for zone in sorted((SYS / "class/thermal").glob("thermal_zone*")):
-        temp = read_int(zone / "temp")
-        if temp is not None:
-            result[zone.name] = {
-                "type": read_text(zone / "type"),
-                "celsius": temp / 1000,
-            }
-
-    # Hardware-monitor sensors
-    for hwmon in sorted((SYS / "class/hwmon").glob("hwmon*")):
-        chip = read_text(hwmon / "name")
-        for path in sorted(hwmon.glob("temp*_input")):
-            temp = read_int(path)
-            if temp is not None:
-                label_path = path.with_name(path.name.replace("_input", "_label"))
-                result[f"{hwmon.name}/{path.stem}"] = {
-                    "chip": chip,
-                    "label": read_text(label_path),
-                    "celsius": temp / 1000,
-                }
-
-    return result
-
-
-def block_devices():
-    result = {}
-    for dev in sorted((SYS / "class/block").iterdir()):
-        if (dev / "partition").exists():
-            continue
-
-        sectors = read_int(dev / "size")
-        sector_size = read_int(dev / "queue/logical_block_size")
-        result[dev.name] = {
-            "size_bytes": sectors * 512 if sectors is not None else None,
-            "logical_sector_bytes": sector_size,
-            "model": read_text(dev / "device/model"),
-        }
-    return result
-
-
-def network_interfaces():
-    result = {}
-    for iface in sorted((SYS / "class/net").iterdir()):
-        result[iface.name] = {
-            "state": read_text(iface / "operstate"),
-            "mac": read_text(iface / "address"),
-            "rx_bytes": read_int(iface / "statistics/rx_bytes"),
-            "tx_bytes": read_int(iface / "statistics/tx_bytes"),
-        }
-    return result
-
-
-def pci_gpus():
-    result = {}
-    for dev in sorted((SYS / "bus/pci/devices").iterdir()):
-        device_class = read_text(dev / "class")
-        if device_class and device_class.startswith("0x03"):
-            result[dev.name] = {
-                "vendor_id": read_text(dev / "vendor"),
-                "device_id": read_text(dev / "device"),
-                "class": device_class,
-            }
-    return result
-
-
-def ipv4_addresses():
-    """Return IPv4 addresses for interfaces, where available."""
-    result = {}
-
+def _read_text(path: Path) -> str:
     try:
-        interfaces = socket.if_nameindex()
+        return path.read_text().strip()
+    except OSError:
+        return ""
+
+
+# Alle Temperatursensoren als (Name, Grad Celsius): Thermal-Zonen unter ihrem Typ, hwmon-Chips mit Chipname und
+# Bezeichnung des Messpunkts. Viele PCs haben die CPU nur unter hwmon (AMD: k10temp), waehrend die Thermal-Zonen
+# nur ACPI-Fuehler enthalten, die kaum die CPU messen.
+def _temperature_sensors() -> list[tuple[str, float]]:
+    sensors: list[tuple[str, float]] = []
+    for zone in sorted((SYS / "class/thermal").glob("thermal_zone*")):
+        if (milli := _read_int(zone / "temp")) is not None:
+            sensors.append((_read_text(zone / "type"), milli / 1000))
+    for chip in sorted((SYS / "class/hwmon").glob("hwmon*")):
+        for temp_input in sorted(chip.glob("temp*_input")):
+            if (milli := _read_int(temp_input)) is not None:
+                label = _read_text(temp_input.with_name(temp_input.name.replace("_input", "_label")))
+                sensors.append((f"{_read_text(chip / 'name')} {label}", milli / 1000))
+    return sensors
+
+
+# Teile von Sensornamen (klein geschrieben), die zur CPU gehoeren: Intel (coretemp, x86_pkg_temp), AMD (k10temp,
+# zenpower, Tctl/Tdie), ARM-Boards (cpu-thermal, soc-thermal, ...)
+CPU_SENSORS = ("coretemp", "x86_pkg_temp", "k10temp", "zenpower", "tctl", "tdie", "package", "cpu", "soc")
+
+
+# Heisseste CPU-Temperatur in Grad Celsius; None, wenn kein Sensor nach CPU aussieht (lieber nichts anzeigen als
+# den Fuehler einer Grafikkarte oder SSD). Unsinnige Werte (<= 0 oder >= 150 Grad) zaehlen nicht.
+def cpu_temperature() -> float | None:
+    temps = [t for name, t in _temperature_sensors() if any(k in name.lower() for k in CPU_SENSORS) and 0 < t < 150]
+    return max(temps) if temps else None
+
+
+# WLAN-Signal in dBm aus /proc/net/wireless
+def wifi_rssi() -> int | None:
+    try:
+        for line in (PROC / "net/wireless").read_text().splitlines()[2:]:
+            return int(float(line.split()[3].rstrip(".")))
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+# Erster Akku unter /sys/class/power_supply; ohne Akku sind alle Werte None
+def battery() -> Battery:
+    for supply in sorted((SYS / "class/power_supply").glob("*")):
+        try:
+            if (supply / "type").read_text().strip() != "Battery":
+                continue
+        except OSError:
+            continue
+        volt, amp, temp = (_read_int(supply / n) for n in ("voltage_now", "current_now", "temp"))
+        return Battery(
+            voltage_v=None if volt is None else volt / 1e6,  # sysfs: Mikrovolt
+            percent=_read_int(supply / "capacity"),
+            current_a=None if amp is None else abs(amp) / 1e6,  # Mikroampere
+            temp_c=None if temp is None else temp / 10,  # Zehntelgrad
+        )
+    return Battery()
+
+
+# IPv4-Adresse je Interface, falls vorhanden
+def ipv4_addresses() -> dict[str, str]:
+    result: dict[str, str] = {}
+    try:
+        names = [name for _, name in socket.if_nameindex()]
     except OSError:
         return result
-
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-        for _, name in interfaces:
+        for name in names:
             try:
-                request = struct.pack("256s", name.encode()[:15])
-                response = fcntl.ioctl(sock.fileno(), 0x8915, request)
+                response = fcntl.ioctl(sock.fileno(), 0x8915, struct.pack("256s", name.encode()[:15]))
                 result[name] = socket.inet_ntoa(response[20:24])
             except OSError:
-                # Interface may have no IPv4 address or may disappear during the scan.
-                continue
-
+                continue  # keine IPv4-Adresse oder Interface verschwunden
     return result
 
 
-def cpu_frequencies():
-    """Return available current CPU frequencies in MHz."""
-    result = {}
+class Hardware:
+    # clock: Zeitquelle in Sekunden fuer die Netzraten
+    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
+        self._clock = clock
+        self._cpu: list[int] | None = None  # letzte Zaehler aus /proc/stat
+        self._net: dict[str, tuple[float, int, int]] = {}  # Interface -> (Zeit, rx_bytes, tx_bytes)
 
-    for cpu in sorted(SYS.glob("devices/system/cpu/cpu[0-9]*")):
-        cpu_name = cpu.name
-
-        # Prefer the current scaling frequency; fall back to cpuinfo_cur_freq.
-        paths = (
-            cpu / "cpufreq/scaling_cur_freq",
-            cpu / "cpufreq/cpuinfo_cur_freq",
-        )
-
-        for path in paths:
-            value_khz = read_int(path)
-            if value_khz is not None:
-                result[cpu_name] = value_khz / 1000
-                break
-
-    return result
-
-
-def read_sysfs_attributes(directory):
-    """Read simple file attributes directly inside a sysfs directory."""
-    attributes = {}
-    try:
-        entries = directory.iterdir()
-    except OSError:
-        return attributes
-
-    for path in entries:
-        if path.is_file():
-            value = read_text(path)
-            if value is not None:
-                attributes[path.name] = value
-
-    return attributes
-
-
-def power_supplies():
-    result = {}
-    base = SYS / "class/power_supply"
-
-    try:
-        supplies = sorted(base.iterdir())
-    except OSError:
-        return result
-
-    for supply in supplies:
-        result[supply.name] = read_sysfs_attributes(supply)
-
-    return result
-
-
-def iio_devices():
-    result = {}
-    base = SYS / "bus/iio/devices"
-
-    try:
-        devices = sorted(base.glob("iio:device*"))
-    except OSError:
-        return result
-
-    for device in devices:
-        attributes = read_sysfs_attributes(device)
-
-        # Include readable attributes from scan-element subdirectory too.
-        scan_elements = device / "scan_elements"
+    # CPU-Last seit dem vorigen Aufruf in Prozent; beim ersten Aufruf None
+    def cpu_percent(self) -> float | None:
         try:
-            attributes["scan_elements"] = read_sysfs_attributes(scan_elements)
+            fields = (PROC / "stat").read_text().splitlines()[0].split()
+            now = [int(v) for v in fields[1:9]]  # user nice system idle iowait irq softirq steal
+        except (OSError, ValueError, IndexError):
+            return None
+        prev, self._cpu = self._cpu, now
+        if prev is None or len(prev) != len(now):
+            return None
+        delta = [b - a for a, b in zip(prev, now, strict=True)]
+        total = sum(delta)
+        idle = delta[3] + delta[4]
+        return 100 * (total - idle) / total if total > 0 else None
+
+    # Interfaces ohne lo und veth, aktive zuerst
+    def net_ifaces(self) -> list[NetIface]:
+        try:
+            names = sorted(p.name for p in (SYS / "class/net").iterdir())
         except OSError:
-            pass
-
-        result[device.name] = attributes
-
-    return result
-
-
-def hwmon_devices():
-    result = {}
-    base = SYS / "class/hwmon"
-
-    try:
-        devices = sorted(base.glob("hwmon*"))
-    except OSError:
-        return result
-
-    for device in devices:
-        result[device.name] = {
-            "name": read_text(device / "name"),
-            "attributes": read_sysfs_attributes(device),
-        }
-
-    return result
-
-
-def proc_diagnostics():
-    result = {
-        "uptime_seconds": None,
-        "loadavg": None,
-        "pressure": {},
-    }
-
-    uptime_text = read_text(PROC / "uptime")
-    if uptime_text:
-        try:
-            result["uptime_seconds"] = float(uptime_text.split()[0])
-        except (ValueError, IndexError):
-            pass
-
-    result["loadavg"] = read_text(PROC / "loadavg")
-
-    pressure_dir = PROC / "pressure"
-    try:
-        for path in sorted(pressure_dir.iterdir()):
-            if path.is_file():
-                value = read_text(path)
-                if value is not None:
-                    result["pressure"][path.name] = value
-    except OSError:
-        pass
-
-    return result
-
-
-if __name__ == "__main__":
-    print("CPU usage:", cpu_usage(), "%")
-    print("CPU frequencies (MHz):", cpu_frequencies())
-    print("RAM:", memory())
-    print("Temperatures:", temperatures())
-    print("Block devices:", block_devices())
-    print("Network:", network_interfaces())
-    print("IPv4 addresses:", ipv4_addresses())
-    print("PCI display devices:", pci_gpus())
-    print("Power supplies:", power_supplies())
-    print("IIO devices:", iio_devices())
-    print("Hardware monitors:", hwmon_devices())
-    print("Proc diagnostics:", proc_diagnostics())
+            return []
+        ips = ipv4_addresses()
+        now = self._clock()
+        result = []
+        for name in names:
+            if name == "lo" or name.startswith("veth"):
+                continue
+            base = SYS / "class/net" / name
+            rx, tx = _read_int(base / "statistics/rx_bytes"), _read_int(base / "statistics/tx_bytes")
+            rx_bps = tx_bps = None
+            if rx is not None and tx is not None:
+                prev = self._net.get(name)
+                if prev and now > prev[0]:
+                    dt = now - prev[0]
+                    rx_bps, tx_bps = max(0.0, (rx - prev[1]) / dt), max(0.0, (tx - prev[2]) / dt)
+                self._net[name] = (now, rx, tx)
+            try:
+                # "unknown" melden Interfaces ohne Link-Erkennung, die trotzdem laufen
+                up = (base / "operstate").read_text().strip() in ("up", "unknown")
+            except OSError:
+                up = False
+            result.append(NetIface(name, up, ips.get(name), rx_bps, tx_bps))
+        return sorted(result, key=lambda n: (not n.up, n.name))

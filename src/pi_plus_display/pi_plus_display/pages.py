@@ -1,75 +1,61 @@
-# Die einzelnen Bildschirmseiten. Jede Seite ist eine Funktion
-# (draw, state, **kw) -> None und zeichnet auf ein 128x64-Bild im Modus "1".
-# Gruppen: Statusseiten, Hardware-Seiten, Graph-Seiten fuers Debugging, danach Sonderseiten (Menue, Alarm, Start).
-# Welche Statusseiten in welcher Reihenfolge erscheinen, steht in STATUS_PAGES.
-# Bedienung per 5-Wege-Joystick:
-#     links/rechts  vorige/naechste Statusseite
-#     Mitte         Menue oeffnen, im Menue: auswaehlen
-#     hoch/runter   im Menue blaettern
-#     Alarm         erscheint automatisch, Mitte = quittieren
+# Die einzelnen Bildschirmseiten. Jede Seite ist eine Funktion (draw, state) -> None und zeichnet
+# auf ein 128x64-Bild im Modus "1". Welche Seiten in welcher Reihenfolge erscheinen, steht in STATUS_PAGES.
+# Bedienung per 5-Wege-Joystick: links/rechts blaettert; jede Taste quittiert einen Alarm.
 
 import math
+from collections.abc import Callable
 
 from PIL import Image, ImageDraw
 
-from .state import TempSensor
+from .state import Group, Motor, RobotState
 from .widgets import (
     BIG,
     NORMAL,
     SMALL,
     H,
     W,
+    Draw,
     bar,
     header,
     label_value,
     page_dots,
-    status_tag,
     text_center,
     text_right,
 )
+
+Page = Callable[[Draw, RobotState], None]
 
 # Spielfeld HSL KidSize in Metern (Laenge x Breite), Mittelkreis-Radius
 FIELD_L, FIELD_W, CIRCLE_R = 9.0, 6.0, 0.75
 # Grenze fuer Drehmoment-Ueberlast in livelybot_serial (diagnostics.torque_overload_threshold)
 OVERLOAD_NM = 10.0
 LOAD_SCALE_NM = 15.0
-TEMP_MIN_C, TEMP_MAX_C = 20.0, 100.0  # Bereich der Temperaturbalken
-TEMP_HOT_C = 80.0  # ab hier wird die Zeile invertiert
-BATTERY_STALE_S = 3.0
-ROWS = 5  # Zeilen auf den Listenseiten
+MAX_IFACES = 4  # Interfaces auf der Netzseite
+GROUP_LABELS: dict[Group, str] = {"left_leg": "L BEIN", "right_leg": "R BEIN", "arms": "ARME", "head": "KOPF"}
 
 
 # Akkuspannung oder "--.-V", wenn noch keine Nachricht kam
-def volt(v):
+def volt(v: float | None) -> str:
     return "--.-V" if v is None else f"{v:.1f}V"
 
 
 # Zahl oder "--", wenn der Wert noch unbekannt ist; fmt z. B. "{:.1f} A"
-def _num(v, fmt="{:.0f}"):
+def _num(v: float | None, fmt: str = "{:.0f}") -> str:
     return "--" if v is None else fmt.format(v)
 
 
-def _pct(v):
+def _pct(v: float | None) -> str:
     return f"{_num(v)}%"
 
 
-def _mmss(seconds):
-    seconds = max(0, int(seconds))
-    return f"{seconds // 60:02d}:{seconds % 60:02d}"
-
-
-def _who(state):
-    return f"{state.robot_name} #{state.player_number}"
-
-
 # Gestrichelte waagrechte Linie
-def _dashed(draw, x0, x1, y, fill=1, step=3):
+def _dashed(draw: Draw, x0: int, x1: int, y: int, fill: int = 1, step: int = 3) -> None:
     for x in range(x0, x1 + 1, step):
         draw.point((x, y), fill=fill)
 
 
 # Verlauf als Flaeche, neuester Wert rechts; lo..hi wird auf die Hoehe top..bottom abgebildet
-def _area(draw, values, x0, x1, top, bottom, lo, hi):
+def _area(draw: Draw, values: list[float], x0: int, x1: int, top: int, bottom: int, lo: float, hi: float) -> None:
     span = max(hi - lo, 1e-9)
     for i, v in enumerate(reversed(values)):
         x = x1 - i
@@ -79,22 +65,8 @@ def _area(draw, values, x0, x1, top, bottom, lo, hi):
         draw.line((x, y, x, bottom), fill=1)
 
 
-# 4980 s -> "1H23M", 59 s -> "59S"
-def _uptime(seconds):
-    if seconds is None:
-        return "--"
-    m = int(seconds) // 60
-    if m < 1:
-        return f"{int(seconds)}S"
-    if m < 60:
-        return f"{m}M"
-    if m < 24 * 60:
-        return f"{m // 60}H{m % 60:02d}M"
-    return f"{m // (24 * 60)}D{m // 60 % 24}H"
-
-
 # Bytes pro Sekunde kurz: 850, 12K, 1.2M
-def _rate(bps):
+def _rate(bps: float | None) -> str:
     if bps is None:
         return "--"
     if bps < 1000:
@@ -110,34 +82,26 @@ def _rate(bps):
 
 
 # Seite 1: Rolle und aktuelles Verhalten
-def page_behavior(draw, s):
-    header(draw, _who(s), s)
+def page_behavior(draw: Draw, s: RobotState) -> None:
+    header(draw, "STATUS", s)
     SMALL.draw(draw, (0, 17), "ROLLE")
     BIG.draw(draw, (26, 12), s.role)
-    label_value(draw, 30, "ACT.", s.action, x_value=26)
-    gc = "connceted" if s.gc_connected else "disconnected"
-    label_value(draw, 40, "GC.", gc, x_value=26)
-    #TODO: move
+    label_value(draw, 30, "AKT.", s.action)
+    label_value(draw, 40, "GC", "verbunden" if s.gc_connected else "getrennt")
     SMALL.draw(draw, (0, 51), "LOK.")
-    bar(draw, 26, 50, 70, 7, s.loc_confidence or 0.0)
-    text_right(
-        draw,
-        W - 1,
-        50,
-        _pct(None if s.loc_confidence is None else round(s.loc_confidence * 100)),
-    )
+    bar(draw, 26, 50, 70, 7, s.loc_percent)
+    text_right(draw, W - 1, 50, _pct(s.loc_percent))
 
 
-# Seite 2: Netzwerk. IP sofort ablesbar, ohne Monitor oder Scan
-def page_network(draw, s):
+# Seite 2: Netzwerk. Die WLAN-IP steht schon in der Kopfzeile, hier Signal und alle Interfaces
+def page_network(draw: Draw, s: RobotState) -> None:
     header(draw, "NETZ", s)
-    label_value(draw, 12, "WLAN", s.wlan_ip, x_value=26)
-    rssi = f"{s.wifi_rssi} dBm" if s.wifi_rssi is not None else "getrennt"
-    text_right(draw, W - 1, 12, rssi, SMALL)
+    label_value(draw, 12, "RSSI", f"{s.wifi_rssi} dBm" if s.wifi_rssi is not None else "getrennt")
 
     if not s.net_ifaces:
+        NORMAL.draw(draw, (0, 24), "keine Interfaces")
         return
-    for i, n in enumerate(s.net_ifaces[:ROWS - 1]):
+    for i, n in enumerate(s.net_ifaces[:MAX_IFACES]):
         y = 20 + i * 8
         SMALL.draw(draw, (1, y), n.name[:7])
         if not n.up:
@@ -149,81 +113,68 @@ def page_network(draw, s):
     text_right(draw, W - 1, 54, "EMPF SEND B/S", SMALL)
 
 
-# Seite 3: Motoren als Raster (ID im Kaestchen, Fehler invertiert), IMU, Akku
-def page_motors(draw, s):
+# Ein Motorkaestchen: ID im Umriss, von unten gefuellt je nach Drehmoment (LOAD_SCALE_NM = voll);
+# die Ziffern werden ueber der Fuellung invertiert. Ausgefallene Motoren sind durchgestrichen
+def _motor_cell(draw: Draw, m: Motor, x: int, y: int, w: int, h: int = 10) -> None:
+    draw.rectangle((x, y, x + w - 1, y + h - 1), outline=1)
+    if not m.ok:
+        draw.line((x, y, x + w - 1, y + h - 1), fill=1)
+        draw.line((x, y + h - 1, x + w - 1, y), fill=1)
+        return
+    label = Image.new("1", (w, h))
+    text_center(ImageDraw.Draw(label), 3, str(m.id), SMALL, 1, 0, w)
+    level = 0 if m.torque_nm is None else round(min(1.0, m.torque_nm / LOAD_SCALE_NM) * (h - 2))
+    for py in range(1, h - 1):
+        for px in range(1, w - 1):
+            filled = py >= h - 1 - level
+            draw.point((x + px, y + py), fill=int(filled != bool(label.getpixel((px, py)))))
+
+
+def page_motors(draw: Draw, s: RobotState) -> None:
     header(draw, "MOTOREN", s)
-    cell_w, cell_h, x0 = 18, 10, 9
-    for row, side in enumerate(("L", "R")):
+    legs: list[tuple[str, Group]] = [("L", "left_leg"), ("R", "right_leg")]
+    for row, (side, group) in enumerate(legs):
         y = 12 + row * 12
         SMALL.draw(draw, (0, y + 3), side)
-        for col in range(6):
-            if row * 6 + col >= len(s.motors):
-                break
-            m = s.motors[row * 6 + col]
-            x = x0 + col * (cell_w + 2)
-            label = str(m.id)
-            if m.ok:
-                draw.rectangle((x, y, x + cell_w - 1, y + cell_h - 1), outline=1)
-                text_center(draw, y + 3, label, SMALL, 1, x, x + cell_w)
-            else:
-                draw.rectangle((x, y, x + cell_w - 1, y + cell_h - 1), fill=1)
-                text_center(draw, y + 3, label, SMALL, 0, x, x + cell_w)
-    bad = [m for m in s.motors if not m.ok]
+        for col, m in enumerate(s.motors_of(group)):
+            _motor_cell(draw, m, 9 + col * 20, y, 18)
+    for col, m in enumerate(s.motors_of("head", "arms")[:10]):
+        _motor_cell(draw, m, 4 + col * 12, 36, 10)
+    bad, peak = s.bad_motors, s.peak_motor
     if bad:
-        NORMAL.draw(draw, (0, 38), f"{bad[0].id} {bad[0].name}")
-        text_right(draw, W - 1, 39, bad[0].error or "KEINE ANTW.", SMALL)
+        NORMAL.draw(draw, (0, 50), f"{bad[0].id} {bad[0].name}")
+        text_right(draw, W - 1, 51, bad[0].error if len(bad) == 1 else f"+{len(bad) - 1} WEITERE", SMALL)
     elif not s.motors:
-        NORMAL.draw(draw, (0, 38), "keine Motordaten")
-    elif all(m.temp_c is None for m in s.motors):
-        loaded = [m for m in s.motors if m.effort_nm is not None]
-        if loaded:
-            top = max(loaded, key=lambda m: abs(m.effort_nm))
-            SMALL.draw(draw, (0, 39), "MAX")
-            NORMAL.draw(draw, (18, 38), f"{abs(top.effort_nm):.1f}Nm {top.name}")
-        else:
-            NORMAL.draw(draw, (0, 38), f"alle {len(s.motors)} Motoren OK")
+        NORMAL.draw(draw, (0, 50), "keine Motordaten")
+    elif peak:
+        SMALL.draw(draw, (0, 51), "MAX")
+        NORMAL.draw(draw, (18, 50), f"{peak.torque_nm:.1f}Nm {peak.name}")
     else:
-        hot = max((m for m in s.motors if m.temp_c is not None), key=lambda m: m.temp_c)
-        SMALL.draw(draw, (0, 39), "MAX")
-        NORMAL.draw(draw, (18, 38), f"{hot.temp_c:.0f}C  {hot.name}")
-    SMALL.draw(draw, (0, 51), "IMU")
-    w = status_tag(draw, 16, 49, s.imu_ok)
-    NORMAL.draw(draw, (16 + w + 3, 50), f"R{s.roll_deg:+.0f} P{s.pitch_deg:+.0f}")
-    text_right(draw, W - 1, 50, volt(s.battery_voltage))
+        NORMAL.draw(draw, (0, 50), f"alle {len(s.motors)} Motoren OK")
 
 
-# Seite 4: Rechnerlast (TODO: takt, cur und max ram, battery_voltage + temp diagnostics hinzufügen)
-def page_system(draw, s):
+# Seite 4: Rechnerlast und Akku
+def page_system(draw: Draw, s: RobotState) -> None:
     header(draw, "SYSTEM", s)
     SMALL.draw(draw, (0, 13), "CPU")
-    bar(draw, 18, 12, 66, 7, (s.cpu_percent or 0) / 100)
+    bar(draw, 18, 12, 66, 7, s.cpu_percent)
     text_right(draw, W - 1, 12, f"{_pct(s.cpu_percent)} {_num(s.cpu_temp_c)}C")
     SMALL.draw(draw, (0, 23), "RAM")
-    bar(draw, 18, 22, 66, 7, (s.ram_percent or 0) / 100)
+    bar(draw, 18, 22, 66, 7, s.ram_percent)
     text_right(draw, W - 1, 22, _pct(s.ram_percent))
-
-    label_value(
-        draw,
-        30,
-        "BAT",
-        "--" if s.battery_voltage is None else s.battery_voltage,
-        x_value=26,
-    )
-    w = (
-        "-- W"
-        if s.battery_voltage is None or s.battery_current_a is None
-        else f"{s.battery_voltage * s.battery_current_a:.0f} W"
-    )
-    c = "" if s.battery_temp_c is None else f" {_num(s.battery_temp_c)}C"
-    text_right(draw, W - 1, 30, w + c)
+    b = s.battery
+    SMALL.draw(draw, (0, 33), "BAT")
+    bar(draw, 18, 32, 66, 7, b.percent)
+    text_right(draw, W - 1, 32, _pct(b.percent))
+    NORMAL.draw(draw, (0, 44), f"{volt(b.voltage_v)} {_num(b.current_a, '{:.1f}')}A {_num(b.power_w)}W {_num(b.temp_c)}C")
 
 
 # ---------------------------------------------------------------- Graph-Seiten
-# Fuers Debugging, entstanden aus den echten Node-Daten (node_output.txt): Feldkarte, Last je Gelenk, Beinlast, Datenfluss
+# Fuers Debugging: Feldkarte, Last je Gelenk, Beinlast
 
 
 # Seite FELD: Feldkarte mit Position, Blickrichtung und Spur, rechts die Zahlen
-def page_field(draw, s):
+def page_field(draw: Draw, s: RobotState) -> None:
     header(draw, "FELD", s)
     ppm = 8  # Pixel pro Meter
     fw, fh = int(FIELD_L * ppm), int(FIELD_W * ppm)
@@ -239,7 +190,7 @@ def page_field(draw, s):
         (x0 + fw + 2, cy - goal, x0 + fw + 2, cy + goal), fill=1
     )  # gegnerisches Tor rechts
 
-    def to_px(x, y):
+    def to_px(x: float, y: float) -> tuple[int, int]:
         return round(cx + x * ppm), round(cy - y * ppm)
 
     for x, y in s.pose_trail[:-1]:
@@ -263,60 +214,50 @@ def page_field(draw, s):
     SMALL.draw(draw, (tx, 31), "W")
     text_right(draw, W - 1, 30, f"{theta:+d}")
     SMALL.draw(draw, (tx, 41), "LOK")
-    lok = "--" if s.loc_confidence is None else round(s.loc_confidence * 100)
-    text_right(draw, W - 1, 40, f"{lok}%")
-    bar(draw, tx, 49, W - tx, 6, s.loc_confidence or 0.0)
-
-
-# Gruppe eines Motors fuer die Lastseite anhand des Namens (l-hip-pitch, head-yaw, ...)
-def _group(name):
-    if name.startswith("head"):
-        return "KOPF"
-    if any(j in name for j in ("hip", "thigh", "calf", "ankle")):
-        return "L BEIN" if name.startswith("l") else "R BEIN"
-    return "ARME"
+    text_right(draw, W - 1, 40, _pct(s.loc_percent))
+    bar(draw, tx, 49, W - tx, 6, s.loc_percent)
 
 
 # Seite LAST: Drehmoment aller Motoren als Balken, gestrichelt die Ueberlastgrenze
-def page_load(draw, s):
+def page_load(draw: Draw, s: RobotState) -> None:
     header(draw, "LAST", s)
     top, bottom = 12, 45
     height = bottom - top
     x = 1
-    groups = []
-    prev = None
+    groups: list[tuple[Group, int, int]] = []  # Gruppe, x links, x rechts
+    prev: Group | None = None
     for m in s.motors:
-        g = _group(m.name)
+        g = m.group
         if g != prev:
             if prev is not None:
                 x += 3
-            groups.append([g, x, x])
+            groups.append((g, x, x))
             prev = g
         if not m.ok:
             draw.rectangle((x, top, x + 3, bottom), outline=1)
             draw.line((x, top, x + 3, bottom), fill=1)
-        elif m.effort_nm is not None:
-            h = round(min(1.0, abs(m.effort_nm) / LOAD_SCALE_NM) * height)
+        elif m.torque_nm is not None:
+            h = round(min(1.0, m.torque_nm / LOAD_SCALE_NM) * height)
             draw.rectangle((x, bottom - h, x + 3, bottom), fill=1)
         draw.point((x + 1, bottom + 1), fill=1)
-        groups[-1][2] = x + 3
+        groups[-1] = (g, groups[-1][1], x + 3)
         x += 5
     if s.motors:
         _dashed(draw, 0, x - 2, bottom - round(OVERLOAD_NM / LOAD_SCALE_NM * height))
     for g, gx0, gx1 in groups:
-        label_w = SMALL.width(g)
+        label = GROUP_LABELS[g]
+        label_w = SMALL.width(label)
         if label_w <= gx1 - gx0 + 4:
-            SMALL.draw(draw, ((gx0 + gx1 - label_w) // 2, 48), g)
-    known = [m for m in s.motors if m.effort_nm is not None]
+            SMALL.draw(draw, ((gx0 + gx1 - label_w) // 2, 48), label)
+    peak = s.peak_motor
     if not s.motors:
         SMALL.draw(draw, (1, 54), "KEINE MOTORDATEN")
-    elif known:
-        top_m = max(known, key=lambda m: abs(m.effort_nm))
-        SMALL.draw(draw, (1, 54), f"MAX {abs(top_m.effort_nm):.1f} NM {top_m.name}")
+    elif peak:
+        SMALL.draw(draw, (1, 54), f"MAX {peak.torque_nm:.1f} NM {peak.name}")
 
 
 # Seite LASTVERLAUF: hoechste Bein-Last der letzten 6 s als Linie, mit Ueberlastgrenze
-def page_load_history(draw, s):
+def page_load_history(draw: Draw, s: RobotState) -> None:
     header(draw, "BEINLAST", s)
     x0, x1, top, bottom = 14, W - 1, 12, 50
     height = bottom - top
@@ -330,7 +271,7 @@ def page_load_history(draw, s):
     draw.line((x0 - 2, top, x0 - 2, bottom), fill=1)
     draw.line((x0 - 2, bottom, x1, bottom), fill=1)
     _dashed(draw, x0, x1, bottom - round(OVERLOAD_NM / LOAD_SCALE_NM * height))
-    hist = s.leg_effort_history
+    hist = s.leg_torque_history
     step = (x1 - x0) / 59  # 60 Werte = 6 s
     pts = []
     for i, v in enumerate(hist):
@@ -348,53 +289,22 @@ def page_load_history(draw, s):
         text_right(draw, W - 1, 53, "KEINE DATEN", SMALL)
 
 
-# Seite DATENFLUSS: Empfangsrate je Topic, fehlende Topics zusammengefasst
-def page_topics(draw, s):
-    header(draw, "DATENF.", s)
-    received = [t for t in s.topics if t.age_s is not None]
-    missing = [t for t in s.topics if t.age_s is None]
-    for i, t in enumerate(received[:5]):
-        y = 12 + i * 8
-        # Veraltet: laenger still als 3 Perioden, mindestens 1 s
-        stale = t.age_s > (max(1.0, 3.0 / t.hz) if t.hz else 1.0)
-        if stale:
-            draw.rectangle((0, y - 1, W - 1, y + 5), fill=1)
-        fill = 0 if stale else 1
-        SMALL.draw(draw, (1, y), t.name, fill)
-        if not t.hz:
-            rate = "-- HZ"
-        else:
-            rate = f"{t.hz:.0f} HZ" if t.hz >= 1 else f"{t.hz:.1f} HZ"
-        text_right(draw, 72, y, rate, SMALL, fill)
-        if stale:
-            text_right(draw, W - 2, y, f"VOR {t.age_s:.0f} S", SMALL, 0)
-        elif t.hz:
-            # Rate logarithmisch: 1 Hz kurz, 100 Hz fast voll
-            frac = min(1.0, math.log10(max(t.hz, 1.0)) / 2.0)
-            draw.rectangle((78, y, 78 + max(1, round(frac * 48)), y + 4), fill=1)
-    if missing:
-        names = " ".join(t.name for t in missing[:3])
-        more = f" +{len(missing) - 3}" if len(missing) > 3 else ""
-        SMALL.draw(draw, (1, 54), f"FEHLT: {names}{more}")
-
-
-STATUS_PAGES = [
-    ("verhalten", page_behavior),
-    ("netzwerk", page_network),
-    ("motoren", page_motors),
-    ("system", page_system),
-    ("feld", page_field),
-    ("last", page_load),
-    ("beinlast", page_load_history),
-    ("datenfluss", page_topics),
+STATUS_PAGES: list[Page] = [
+    page_behavior,
+    page_network,
+    page_motors,
+    page_system,
+    page_field,
+    page_load,
+    page_load_history,
 ]
 
 
 # Rendert Statusseite index inkl. Seitenpunkten
-def render_status(state, index):
+def render_status(state: RobotState, index: int) -> Image.Image:
     img = Image.new("1", (W, H), 0)
     d = ImageDraw.Draw(img)
-    STATUS_PAGES[index][1](d, state)
+    STATUS_PAGES[index](d, state)
     page_dots(d, index, len(STATUS_PAGES))
     return img
 
@@ -402,19 +312,11 @@ def render_status(state, index):
 
 # Alarm: ganzer Bildschirm invertiert, damit er aus Entfernung auffaellt.
 # Im Betrieb im Sekundentakt mit der Normalansicht abwechselnd blinken lassen.
-def render_alarm(
-    state,
-    title="FEHLER",
-    lines=("Motor 4  L-Knie", "keine Antwort, 3 s"),
-    hint="MITTE = quittieren",
-):
+def render_alarm(title: str = "FEHLER", lines: tuple[str, ...] = ("Motor 4  L-Knie", "keine Antwort")) -> Image.Image:
     img = Image.new("1", (W, H), 1)
     d = ImageDraw.Draw(img)
     d.rectangle((2, 2, W - 3, H - 3), outline=0)
     text_center(d, 6, title, BIG, fill=0)
     for i, line in enumerate(lines[:2]):
         text_center(d, 25 + i * 10, line, NORMAL, fill=0)
-    d.line((6, 47, W - 7, 47), fill=0)
-    text_center(d, 51, hint, SMALL, fill=0)
     return img
-

@@ -1,193 +1,151 @@
-import tempfile
-import unittest
-from pathlib import Path
-from unittest.mock import MagicMock, patch
+# Tests fuer hardware_interfaces auf einem nachgebauten /sys und /proc
 
-from pi_plus_display import hardware_interfaces
+from unittest.mock import patch
 
+import pytest
 
-class DiagnosticsTests(unittest.TestCase):
-    def setUp(self):
-        self.temp_dir = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp_dir.name)
-        self.sys = self.root / "sys"
-        self.proc = self.root / "proc"
-        self.sys.mkdir()
-        self.proc.mkdir()
-
-        # Redirect the module's filesystem paths to the temporary test tree.
-        self.sys_patcher = patch.object(hardware_interfaces, "SYS", self.sys)
-        self.proc_patcher = patch.object(hardware_interfaces, "PROC", self.proc)
-        self.sys_patcher.start()
-        self.proc_patcher.start()
-        self.addCleanup(self.sys_patcher.stop)
-        self.addCleanup(self.proc_patcher.stop)
-        self.addCleanup(self.temp_dir.cleanup)
-
-    def write(self, path, content):
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content)
-
-    def test_memory(self):
-        self.write(
-            self.proc / "meminfo",
-            "MemTotal: 1000 kB\nMemAvailable: 400 kB\n",
-        )
-
-        result = hardware_interfaces.memory()
-
-        self.assertEqual(result["total_bytes"], 1_024_000)
-        self.assertEqual(result["available_bytes"], 409_600)
-        self.assertEqual(result["used_bytes"], 614_400)
-        self.assertEqual(result["used_percent"], 60.0)
-
-    def test_cpu_usage(self):
-        counters = iter(
-            [
-                [100, 0, 50, 800, 50, 0, 0, 0],
-                [120, 0, 60, 900, 60, 0, 0, 0],
-            ]
-        )
-
-        with (
-            patch.object(
-                hardware_interfaces, "cpu_counters", side_effect=lambda: next(counters)
-            ),
-            patch.object(hardware_interfaces.time, "sleep"),
-        ):
-            result = hardware_interfaces.cpu_usage(interval=0)
-
-        # 30 busy ticks out of 140 total ticks.
-        self.assertEqual(result, 21.4)
-
-    def test_temperatures(self):
-        self.write(self.sys / "class/thermal/thermal_zone0/type", "cpu")
-        self.write(self.sys / "class/thermal/thermal_zone0/temp", "42000")
-
-        result = hardware_interfaces.temperatures()
-
-        self.assertEqual(result["thermal_zone0"]["type"], "cpu")
-        self.assertEqual(result["thermal_zone0"]["celsius"], 42.0)
-
-    def test_block_device(self):
-        self.write(self.sys / "class/block/sda/size", "1000")
-        self.write(self.sys / "class/block/sda/queue/logical_block_size", "512")
-        self.write(self.sys / "class/block/sda/device/model", "TestDisk")
-
-        result = hardware_interfaces.block_devices()
-
-        self.assertEqual(result["sda"]["size_bytes"], 512_000)
-        self.assertEqual(result["sda"]["model"], "TestDisk")
-
-    def test_network_interface(self):
-        base = self.sys / "class/net/eth0"
-        self.write(base / "operstate", "up")
-        self.write(base / "address", "00:11:22:33:44:55")
-        self.write(base / "statistics/rx_bytes", "1234")
-        self.write(base / "statistics/tx_bytes", "5678")
-
-        result = hardware_interfaces.network_interfaces()
-
-        self.assertEqual(result["eth0"]["state"], "up")
-        self.assertEqual(result["eth0"]["rx_bytes"], 1234)
-        self.assertEqual(result["eth0"]["tx_bytes"], 5678)
-
-    def test_pci_gpu(self):
-        base = self.sys / "bus/pci/devices/0000:01:00.0"
-        self.write(base / "class", "0x030000")
-        self.write(base / "vendor", "0x1234")
-        self.write(base / "device", "0xabcd")
-
-        result = hardware_interfaces.pci_gpus()
-
-        self.assertEqual(result["0000:01:00.0"]["vendor_id"], "0x1234")
-        self.assertEqual(result["0000:01:00.0"]["device_id"], "0xabcd")
-
-    def test_cpu_frequencies(self):
-        self.write(
-            self.sys / "devices/system/cpu/cpu0/cpufreq/scaling_cur_freq",
-            "1500000",
-        )
-
-        result = hardware_interfaces.cpu_frequencies()
-
-        self.assertEqual(result["cpu0"], 1500.0)
-
-    def test_ipv4_addresses(self):
-        # ioctl returns the IPv4 address in bytes 20–23.
-        response = bytearray(24)
-        response[20:24] = bytes([192, 168, 1, 10])
-
-        mock_socket = MagicMock()
-        mock_socket.__enter__.return_value = mock_socket
-        mock_socket.fileno.return_value = 7
-
-        with (
-            patch.object(
-                hardware_interfaces.socket, "if_nameindex", return_value=[(2, "eth0")]
-            ),
-            patch.object(
-                hardware_interfaces.socket, "socket", return_value=mock_socket
-            ),
-            patch.object(
-                hardware_interfaces.fcntl, "ioctl", return_value=bytes(response)
-            ),
-        ):
-            result = hardware_interfaces.ipv4_addresses()
-
-        self.assertEqual(result["eth0"], "192.168.1.10")
-
-    def test_power_supplies(self):
-        base = self.sys / "class/power_supply/BAT0"
-        self.write(base / "type", "Battery")
-        self.write(base / "capacity", "85")
-        self.write(base / "status", "Discharging")
-
-        result = hardware_interfaces.power_supplies()
-
-        self.assertEqual(result["BAT0"]["type"], "Battery")
-        self.assertEqual(result["BAT0"]["capacity"], "85")
-        self.assertEqual(result["BAT0"]["status"], "Discharging")
-
-    def test_iio_devices(self):
-        base = self.sys / "bus/iio/devices/iio:device0"
-        self.write(base / "name", "test_imu")
-        self.write(base / "in_accel_x_raw", "123")
-        self.write(base / "scan_elements/in_accel_x_en", "1")
-
-        result = hardware_interfaces.iio_devices()
-
-        self.assertEqual(result["iio:device0"]["name"], "test_imu")
-        self.assertEqual(result["iio:device0"]["in_accel_x_raw"], "123")
-        self.assertEqual(result["iio:device0"]["scan_elements"]["in_accel_x_en"], "1")
-
-    def test_hwmon_devices(self):
-        base = self.sys / "class/hwmon/hwmon0"
-        self.write(base / "name", "test_sensor")
-        self.write(base / "temp1_input", "42000")
-        self.write(base / "temp1_label", "CPU")
-
-        result = hardware_interfaces.hwmon_devices()
-
-        self.assertEqual(result["hwmon0"]["name"], "test_sensor")
-        self.assertEqual(result["hwmon0"]["attributes"]["temp1_input"], "42000")
-        self.assertEqual(result["hwmon0"]["attributes"]["temp1_label"], "CPU")
-
-    def test_proc_diagnostics(self):
-        self.write(self.proc / "uptime", "123.45 67.89\n")
-        self.write(self.proc / "loadavg", "0.10 0.20 0.30 1/100 1234\n")
-        self.write(
-            self.proc / "pressure/cpu",
-            "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\n",
-        )
-
-        result = hardware_interfaces.proc_diagnostics()
-
-        self.assertEqual(result["uptime_seconds"], 123.45)
-        self.assertEqual(result["loadavg"], "0.10 0.20 0.30 1/100 1234")
-        self.assertIn("cpu", result["pressure"])
-        self.assertIn("avg10=0.00", result["pressure"]["cpu"])
+from pi_plus_display import hardware_interfaces as hw
 
 
-if __name__ == "__main__":
-    unittest.main()
+def _write(path, text):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+
+
+# CPU-Zaehler, Speicher, zwei Thermal-Zonen, WLAN und drei Interfaces
+def _fake_root(root, user=100, idle=800, rx=1000):
+    sys_, proc = root / "sys", root / "proc"
+    _write(proc / "stat", f"cpu  {user} 0 50 {idle} 50 0 0 0\n")
+    _write(proc / "meminfo", "MemTotal: 4194304 kB\nMemAvailable: 1048576 kB\n")
+    _write(proc / "net/wireless", "Inter-| sta\n face | tus\nwlan0: 0000   58.  -58.  -256  0 0 0 0 0 0\n")
+    _write(sys_ / "class/thermal/thermal_zone0/temp", "71000")
+    _write(sys_ / "class/thermal/thermal_zone0/type", "cpu-thermal")
+    _write(sys_ / "class/thermal/thermal_zone1/temp", "90000")  # heisser, aber kein CPU-Sensor
+    _write(sys_ / "class/thermal/thermal_zone1/type", "acpitz")
+    for name, state in (("wlan0", "up"), ("eth0", "down"), ("can0", "unknown"), ("lo", "unknown")):
+        base = sys_ / "class/net" / name
+        _write(base / "operstate", state)
+        _write(base / "statistics/rx_bytes", str(rx))
+        _write(base / "statistics/tx_bytes", "500")
+    return sys_, proc
+
+
+@pytest.fixture
+def fake(tmp_path):
+    sys_, proc = _fake_root(tmp_path)
+    with (
+        patch.object(hw, "SYS", sys_),
+        patch.object(hw, "PROC", proc),
+        patch.object(hw, "ipv4_addresses", lambda: {"wlan0": "172.20.1.13"}),
+    ):
+        yield tmp_path
+
+
+def test_ram_percent(fake):
+    assert hw.ram_percent() == 75.0
+
+
+def test_cpu_temperature_uses_cpu_sensors_only(fake):
+    assert hw.cpu_temperature() == 71.0  # nicht die 90 Grad des acpitz-Fuehlers
+
+
+def _hwmon(root, number, name, **temps):
+    chip = root / "sys/class/hwmon" / f"hwmon{number}"
+    _write(chip / "name", name)
+    for i, (label, milli) in enumerate(temps.items(), start=1):
+        _write(chip / f"temp{i}_input", str(milli))
+        _write(chip / f"temp{i}_label", label.replace("_", " "))
+
+
+def test_cpu_temperature_on_an_amd_pc_reads_hwmon_not_the_acpi_zone(tmp_path):
+    # wie auf einem PC, bei dem die Thermal-Zonen nur 17 Grad zeigen, k10temp aber 49
+    _write(tmp_path / "sys/class/thermal/thermal_zone0/temp", "17000")
+    _write(tmp_path / "sys/class/thermal/thermal_zone0/type", "acpitz")
+    _hwmon(tmp_path, 0, "nvme", Composite=61850)  # SSD, heisser als die CPU, zaehlt nicht
+    _hwmon(tmp_path, 1, "k10temp", Tctl=49125)
+    _hwmon(tmp_path, 2, "amdgpu", edge=55000)
+    with patch.object(hw, "SYS", tmp_path / "sys"):
+        assert hw.cpu_temperature() == 49.125
+
+
+def test_cpu_temperature_on_an_intel_pc_takes_the_hottest_core(tmp_path):
+    _hwmon(tmp_path, 0, "coretemp", Package_id_0=52000, Core_0=48000, Core_1=55000)
+    with patch.object(hw, "SYS", tmp_path / "sys"):
+        assert hw.cpu_temperature() == 55.0
+
+
+def test_cpu_temperature_unknown_sensors_or_garbage_give_none(tmp_path):
+    _write(tmp_path / "sys/class/thermal/thermal_zone0/temp", "17000")
+    _write(tmp_path / "sys/class/thermal/thermal_zone0/type", "acpitz")
+    _hwmon(tmp_path, 0, "nvme", Composite=40000)
+    with patch.object(hw, "SYS", tmp_path / "sys"):
+        assert hw.cpu_temperature() is None  # nichts sieht nach CPU aus
+    _hwmon(tmp_path, 1, "coretemp", Core_0=0, Core_1=-274000, Core_2=999000)
+    with patch.object(hw, "SYS", tmp_path / "sys"):
+        assert hw.cpu_temperature() is None  # nur Unsinnswerte
+
+
+def test_wifi_rssi(fake):
+    assert hw.wifi_rssi() == -58
+
+
+def test_missing_proc_gives_none(tmp_path):
+    with patch.object(hw, "SYS", tmp_path / "sys"), patch.object(hw, "PROC", tmp_path / "proc"):
+        assert hw.ram_percent() is None
+        assert hw.cpu_temperature() is None
+        assert hw.wifi_rssi() is None
+        assert hw.Hardware().cpu_percent() is None
+        assert hw.Hardware().net_ifaces() == []
+
+
+def test_meminfo_without_available(tmp_path):
+    _write(tmp_path / "proc/meminfo", "MemTotal: 1000 kB\n")
+    with patch.object(hw, "PROC", tmp_path / "proc"):
+        assert hw.ram_percent() is None
+
+
+def test_cpu_percent_needs_two_polls(fake):
+    h = hw.Hardware()
+    assert h.cpu_percent() is None
+    _fake_root(fake, user=130, idle=870)  # 30 von 100 Ticks belegt
+    assert h.cpu_percent() == 30.0
+
+
+def test_net_ifaces_rates_and_order(fake):
+    t = [10.0]
+    h = hw.Hardware(clock=lambda: t[0])
+    first = h.net_ifaces()
+    assert all(n.rx_bps is None for n in first)
+    _fake_root(fake, rx=3000)  # 2000 Bytes mehr
+    t[0] = 12.0
+    can, wlan, eth = h.net_ifaces()  # aktive zuerst (alphabetisch), lo fehlt
+    assert (can.name, wlan.name, eth.name) == ("can0", "wlan0", "eth0")
+    assert wlan.up and wlan.ip == "172.20.1.13" and wlan.rx_bps == 1000.0 and wlan.tx_bps == 0.0
+    assert can.up and can.ip is None
+    assert not eth.up
+
+
+def test_ipv4_addresses_parses_ioctl():
+    response = bytearray(24)
+    response[20:24] = bytes([192, 168, 1, 10])
+    with (
+        patch.object(hw.socket, "if_nameindex", return_value=[(2, "eth0")]),
+        patch.object(hw.fcntl, "ioctl", return_value=bytes(response)),
+    ):
+        assert hw.ipv4_addresses() == {"eth0": "192.168.1.10"}
+
+
+def test_battery_from_power_supply(tmp_path):
+    ps = tmp_path / "sys/class/power_supply"
+    _write(ps / "AC/type", "Mains")
+    for name, value in (("type", "Battery"), ("voltage_now", "23400000"), ("current_now", "-3200000"), ("temp", "315"), ("capacity", "72")):
+        _write(ps / "BAT0" / name, value)
+    with patch.object(hw, "SYS", tmp_path / "sys"):
+        assert hw.battery() == hw.Battery(23.4, 72, 3.2, 31.5)
+        assert hw.battery().power_w == 23.4 * 3.2
+
+
+def test_battery_missing(tmp_path):
+    with patch.object(hw, "SYS", tmp_path / "sys"):
+        assert hw.battery() == hw.Battery()
+        assert hw.battery().power_w is None

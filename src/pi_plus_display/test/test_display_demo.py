@@ -1,44 +1,33 @@
-# Tests fuer den Demo-Modus, fallen mit display_demo.py weg
+# Tests fuer das Demo-Fenster ohne Fenster: LoopbackSerial als Gegenstelle des UART-Protokolls
 
-from pi_plus_display.display_demo import KEYS, WindowBoard
+from pi_plus_display.board import StatusBoardUart, to_pages
+from pi_plus_display.display_demo import LoopbackSerial
 from pi_plus_display.pages import render_status
 from pi_plus_display.state import RobotState
 
 
-class _Board:
-    def __init__(self):
-        self.sent, self.closed = [], False
-
-    def send_image(self, img):
-        self.sent.append(img)
-        return 8
-
-    def read_keys(self):
-        return ["up"]
-
-    def resend_all(self):
-        pass
-
-    def close(self):
-        self.closed = True
-
-
-def test_window_board_mirrors_images_and_merges_keys():
-    board = _Board()
-    win = WindowBoard(board)
+def test_window_image_comes_through_the_protocol():
+    ser = LoopbackSerial()
+    uart = StatusBoardUart(ser)
     img = render_status(RobotState(), 0)
-    assert win.send_image(img) == 8
-    assert win.image is img and board.sent == [img]
-    win.keys.put(KEYS["Right"])
-    win.keys.put(KEYS["Return"])
-    assert win.read_keys() == ["up", "right", "center"]
-    assert win.read_keys() == ["up"]
-    win.close()
-    assert board.closed
+    uart.send_image(img)
+    shown = ser.image()
+    assert to_pages(shown) == to_pages(img)
+    assert ser.image() is shown  # unveraendert: dasselbe Objekt
+    uart.send_image(render_status(RobotState(), 1))
+    assert ser.image() is not shown
 
 
-def test_window_board_without_board():
-    win = WindowBoard()
-    assert win.send_image(render_status(RobotState(), 0)) == 0
-    win.keys.put("left")
-    assert win.read_keys() == ["left"]
+def test_window_keys_come_back_as_joystick_frames():
+    ser = LoopbackSerial()
+    uart = StatusBoardUart(ser)
+    ser.press("right")
+    ser.press("center")
+    assert uart.read_keys() == ["right", "center"]
+    assert uart.read_keys() == []
+
+
+def test_loopback_has_no_real_port_and_ignores_close():
+    ser = LoopbackSerial()
+    assert ser.in_waiting == 0 and ser.read(10) == b""
+    ser.close()

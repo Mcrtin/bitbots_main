@@ -1,150 +1,258 @@
+# Die Node: abonniert, was die Anzeige braucht, und schreibt es in den RobotState (state.py).
+# In einem Timer rendert sie das 128x64-Bild (pages.py) und schickt es per UART an die Platine (board.py);
+# deren Joystick steuert die Seiten.
+# Parameter (config/display.yaml): demo, serial_port, baudrate, frame_rate.
+#   demo:=true   Fenster am Rechner statt der Platine, serial_port wird ignoriert
+#   demo:=false  die Platine an serial_port muss sich oeffnen lassen
+# Parameter gibt man mit --ros-args -p an: ros2 run pi_plus_display display --ros-args -p demo:=true
+# (ohne --ros-args -p wertet ROS demo:=true als Topic-Umleitung und die Node sieht den Parameter nie)
+# Kann die Node so nicht sinnvoll laufen (Port fehlt, Fehler auf dem UART, Demo-Fenster geht nicht auf), beendet sie
+# sich mit einer Fehlermeldung (FatalError). Dass andere Nodes noch fehlen, ist dagegen normal: dann zeigt die Anzeige
+# "keine Daten" und wartet.
+
+import math
+import os
+import sys
+import time
+from typing import Any, NamedTuple
+
 import rclpy
-from rclpy.node import Node
-from std_msgs.msg import Bool, Float32
-import soccer_vision_3d_msgs.msg as sv3dm
+from PIL import Image
+from bitbots_msgs.msg import Strategy
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus
-from geometry_msgs.msg import Pose, PoseStamped, PoseWithCovarianceStamped
-from sensor_msgs.msg import JointState
-from bitbots_msgs.msg import Strategy, TeamData
-from sensor_msgs.msg import CameraInfo
-from bitbots_msgs.msg import RobotControlState, Workload
 from game_controller_hsl_interfaces.msg import GameState
-from sensor_msgs.msg import Imu
-from std_msgs.msg import Int8
+from geometry_msgs.msg import PoseWithCovarianceStamped
+from rclpy.clock import Clock, ClockType
+from rclpy.node import Node
+from sensor_msgs.msg import JointState
 
-from pi_plus_display.status_display import StatusDisplay
-import pi_plus_display.hardware_interfaces as hwif
+from .board import Key, SerialPort, StatusBoardUart
+from .pages import STATUS_PAGES, render_alarm, render_status
+from .state import Pose, RobotState
 
-
-class MyNode(Node):
-    def __init__(self):
-        super().__init__("my_node")
-        self.demo = self.declare_parameter("demo", True).value
-        self.serial_port = self.declare_parameter("serial_port", "/dev/ttyS4").value
-        self.baudrate = self.declare_parameter("baudrate", 115200).value
-        self.frame_rate = self.declare_parameter("frame_rate", 10.0).value
-        self.set_parameters(
-            [
-                rclpy.parameter.Parameter(
-                    "use_sim_time",
-                    rclpy.Parameter.Type.BOOL,
-                    False,
-                ),
-            ]
-        )
-
-        self.status_display = StatusDisplay(self)
-        display = self.status_display.source
-        if self.demo:
-            from pi_plus_display.display_demo import start_window
-
-            start_window(self, self.status_display)
-
-        self.pose = None
-        self.camera_info = None
-        self.strategy = None
-        self.joints = None
-        self.battery_voltage = None
-        self.servo_overload = False
-        self.servo_overheat = False
-        self.servo_diag_error = None
-        self.imu_diag_error = None
-
-        self.cpu_usage = None
-        self.cpu_frequencies = None
-        self.memory = None
-        self.temperatures = None
-        self.block_devices = None
-        self.network_interfaces = None
-        self.ipv4_addresses = None
-        self.pci_gpus = None
-        self.power_supplies = None
-        self.iio_devices = None
-        self.hwmon_devices = None
-        self.proc_diagnostics = None
-
-        self.create_subscription(Float32, "battery_voltage", self.voltage_cb, 1)
-        self.create_subscription(DiagnosticArray, "diagnostics_agg", self.diag_cb, 1)
-        self.create_subscription(JointState, "joint_states", self.joint_state_cb, 1)
-        self.create_subscription(Strategy, "strategy", self.strategy_cb, 1)
-        self.create_subscription(
-            PoseWithCovarianceStamped, "pose_with_covariance", self.pose_cb, 1
-        )
-        self.create_subscription(
-            CameraInfo, "/zed/zed_node/rgb/camera_info", self.camera_info_callback, 1
-        )
-
-        # Create timer
-        self.create_timer(0.5, self.timer_callback)
-        self.get_logger().info("Node initialized successfully.")
-
-    def pose_cb(self, msg: PoseWithCovarianceStamped):
-        self.pose = msg.pose
-        self.status_display.source.on_pose(msg)
-
-    def camera_info_callback(self, msg: CameraInfo):
-        self.camera_info = msg
-        self.status_display.source.on_camera_info(msg)
-
-    def strategy_cb(self, msg: Strategy):
-        self.strategy = msg
-        self.status_display.source.on_strategy(msg)
-
-    def joint_state_cb(self, msg: JointState):
-        self.joints = msg
-        self.status_display.source.on_joint_states(msg)
-
-    def voltage_cb(self, msg: Float32):
-        """Receives data sent by the battery management system."""
-        self.battery_voltage = msg.data
-        self.status_display.source.on_battery(msg)
-
-    def diag_cb(self, msg: DiagnosticArray):
-        """Updates the diagnostic state."""
-        self.status_display.source.on_diagnostics(msg)
-        status: DiagnosticStatus
-        for status in msg.status:
-            if "/Servos/" in status.name:
-                if status.level == DiagnosticStatus.ERROR:
-                    if "Overload" in status.message:
-                        self.servo_overload = True
-                    elif "Overheat" in status.message:
-                        self.servo_overheat = True
-
-            elif "/Servos" in status.name:
-                self.servo_diag_error = status.level in (
-                    DiagnosticStatus.ERROR,
-                    DiagnosticStatus.STALE,
-                )
-            elif "/IMU" in status.name:
-                self.imu_diag_error = status.level in (
-                    DiagnosticStatus.ERROR,
-                    DiagnosticStatus.STALE,
-                )
-
-    def timer_callback(self):
-        self.cpu_usage = hwif.cpu_usage()
-        self.cpu_frequencies = hwif.cpu_frequencies()
-        self.memory = hwif.memory()
-        self.temperatures = hwif.temperatures()
-        self.block_devices = hwif.block_devices()
-        self.network_interfaces = hwif.network_interfaces()
-        self.ipv4_addresses = hwif.ipv4_addresses()
-        self.pci_gpus = hwif.pci_gpus()
-        self.power_supplies = hwif.power_supplies()
-        self.iio_devices = hwif.iio_devices()
-        self.hwmon_devices = hwif.hwmon_devices()
-        self.proc_diagnostics = hwif.proc_diagnostics()
+ROLE_NAMES = {0: "?", 1: "PAUSE", 2: "ANDERE", 3: "STURM", 4: "UNTERST.", 5: "ABWEHR", 6: "TOR"}
+ACTION_NAMES = {
+    0: "-",
+    1: "Positionieren",
+    2: "Ball anlaufen",
+    3: "Tor schiessen",
+    4: "Warten",
+    5: "Schiessen",
+    6: "Ball suchen",
+    7: "Lokalisieren",
+    8: "Passiv",
+}
+# Meldungen aus robot::motorDiagnostic (livelybot_serial) -> kurzer Text fuer die Anzeige
+MOTOR_MESSAGES = {"No CAN data": "KEINE ANTW."}
+POSE_TRAIL = 30
+LOW_BATTERY_PERCENT = 10  # darunter Alarm
+ALARM_LINE_CHARS = 21  # Zeichen pro Zeile im Alarm
+WARN, ERROR = 1, 2  # DiagnosticStatus.WARN / .ERROR; STALE = 3
 
 
-def main(args=None):
-    rclpy.init(args=args)
-    node = MyNode()
+# Die Node kann so nicht sinnvoll laufen: Meldung ausgeben und beenden (siehe main)
+class FatalError(Exception):
+    pass
 
+
+# Offener serieller Port; FatalError, wenn er fehlt, nicht zugreifbar ist oder sich nicht oeffnen laesst
+def open_serial(port: str, baudrate: int) -> SerialPort:
+    hint = "(ohne Platine: ros2 run pi_plus_display display --ros-args -p demo:=true)"
+    if not port:
+        raise FatalError(f"serial_port ist nicht gesetzt {hint}")
+    if not os.path.exists(port):
+        raise FatalError(f"serial_port {port} gibt es nicht {hint}")
+    if not os.access(port, os.R_OK | os.W_OK):
+        raise FatalError(f"keine Lese- und Schreibrechte auf {port} (Benutzer in der Gruppe dialout?)")
     try:
+        import serial  # pyserial
+    except ModuleNotFoundError as e:
+        raise FatalError(f"pyserial fehlt ({e}); in bitbots_main: pixi add --feature ros 'pyserial>=3.5,<4'") from e
+    try:
+        ser: SerialPort = serial.Serial(port, baudrate, timeout=0, write_timeout=0.1)
+        return ser
+    except (OSError, ValueError) as e:  # serial.SerialException ist ein OSError
+        raise FatalError(f"{port} laesst sich nicht mit {baudrate} Baud oeffnen: {e}") from e
+
+
+class Alarm(NamedTuple):
+    title: str
+    line1: str
+    line2: str
+    end: float  # time.monotonic()
+
+
+class DisplayNode(Node):
+    def __init__(self) -> None:
+        super().__init__("display")
+        demo = self.declare_parameter("demo", False).value
+        serial_port = self.declare_parameter("serial_port", "/dev/ttyS4").value
+        baudrate = self.declare_parameter("baudrate", 115200).value
+        frame_rate = self.declare_parameter("frame_rate", 10.0).value
+        self.set_parameters([rclpy.parameter.Parameter("use_sim_time", rclpy.Parameter.Type.BOOL, False)])
+        if frame_rate <= 0:
+            raise FatalError(f"frame_rate muss groesser als 0 sein, ist {frame_rate}")
+
+        self.state = RobotState()
+        self.page = 0
+        self.alarm: Alarm | None = None
+        self.fatal_error: str | None = None  # von Hilfs-Threads gemeldet (Demo-Fenster), main() gibt es aus
+        self._failed: set[str] | None = None  # fehlerhafte Diagnosen; None = noch keine Meldung erhalten
+        self._battery_low = False
+
+        ser: SerialPort
+        if demo:
+            from .display_demo import LoopbackSerial, check_window, start_window
+
+            try:
+                check_window()
+            except RuntimeError as e:
+                raise FatalError(str(e)) from e
+            loopback = LoopbackSerial()  # das Fenster sieht nur, was ueber das Protokoll kommt
+            start_window(self, loopback)
+            ser = loopback
+        else:
+            ser = open_serial(serial_port, baudrate)
+        self.uart = StatusBoardUart(ser)
+
+        # Steady Clock: die Anzeige soll auch laufen, wenn use_sim_time gesetzt ist und keine /clock kommt
+        steady = Clock(clock_type=ClockType.STEADY_TIME)
+        self.create_timer(1.0 / frame_rate, self._on_frame, clock=steady)
+
+        self.create_subscription(DiagnosticArray, "diagnostics_agg", self.on_diagnostics, 1)
+        self.create_subscription(GameState, "gamestate", self.on_game_state, 1)
+        self.create_subscription(JointState, "joint_states", self.on_joint_states, 1)
+        self.create_subscription(Strategy, "strategy", self.on_strategy, 1)
+        self.create_subscription(PoseWithCovarianceStamped, "pose_with_covariance", self.on_pose, 1)
+
+    def destroy_node(self) -> None:
+        self.uart.close()
+        super().destroy_node()
+
+    # ------------------------------------------------------------- Platine, Rendern, Joystick
+
+    def _on_frame(self) -> None:
+        try:
+            keys = self.uart.read_keys()
+        except OSError as e:
+            raise FatalError(f"Lesen vom UART fehlgeschlagen: {e}") from e
+        for key in keys:
+            self.joystick(key)
+        self.state.update()
+        self._alarm_on_low_battery()
+        try:
+            self.uart.send_image(self.render())
+        except OSError as e:
+            raise FatalError(f"Senden per UART fehlgeschlagen: {e}") from e
+
+    # key: "up", "down", "left", "right" oder "center"; jede Taste quittiert den Alarm
+    def joystick(self, key: Key) -> None:
+        self.alarm = None
+        if key in ("left", "right"):
+            self.page = (self.page + (1 if key == "right" else -1)) % len(STATUS_PAGES)
+
+    # Blinkt, bis es quittiert wird oder die Zeit abgelaufen ist
+    def raise_alarm(self, title: str, line1: str, line2: str, seconds: float = 30) -> None:
+        self.alarm = Alarm(title, line1[:ALARM_LINE_CHARS], line2[:ALARM_LINE_CHARS], time.monotonic() + seconds)
+
+    # Alarm, sobald der Akku unter die Schwelle faellt (auch beim Start); erst nach Erholung wieder
+    def _alarm_on_low_battery(self) -> None:
+        percent = self.state.battery.percent
+        low = percent is not None and percent < LOW_BATTERY_PERCENT
+        if low and not self._battery_low:
+            self.raise_alarm("AKKU", f"{percent} %", "bitte laden", seconds=300)
+        self._battery_low = low
+
+    def render(self) -> Image.Image:
+        now = time.monotonic()
+        if self.alarm and now > self.alarm.end:
+            self.alarm = None
+        if self.alarm and int(now * 2) % 2 == 0:  # blinkt mit 1 Hz
+            return render_alarm(self.alarm.title, (self.alarm.line1, self.alarm.line2))
+        return render_status(self.state, self.page)
+
+    # ------------------------------------------------------------- Nachrichten
+
+    def on_strategy(self, msg: Strategy) -> None:
+        self.state.role = ROLE_NAMES.get(msg.role, "?")
+        self.state.action = ACTION_NAMES.get(msg.action, "-")
+
+    # Der Game-Controller-Empfaenger veroeffentlicht gamestate nur fuer gueltige Pakete; der Inhalt ist hier egal
+    def on_game_state(self, msg: GameState) -> None:
+        self.state.game_state_received()
+
+    def on_joint_states(self, msg: JointState) -> None:
+        self.state.set_joint_torques(dict(zip(msg.name, msg.effort, strict=False)))
+
+    def on_pose(self, msg: PoseWithCovarianceStamped) -> None:
+        p = msg.pose.pose.position
+        yaw = quat_to_yaw(msg.pose.pose.orientation)
+        cov = msg.pose.covariance
+        # Grobe Konfidenz aus Positions- und Winkelunsicherheit (1 = sicher). Heuristik, ggf. anpassen;
+        # in der Simulation sind die x/y-Varianzen 0, nur die Yaw-Varianz ist gesetzt
+        sigma = math.sqrt(max(0.0, cov[0]) + max(0.0, cov[7])) + math.sqrt(max(0.0, cov[35]))
+        s = self.state
+        s.pose = Pose(p.x, p.y, round(math.degrees(yaw)))
+        s.loc_percent = round(100 * math.exp(-sigma))
+        s.pose_trail.append((p.x, p.y))
+        del s.pose_trail[:-POSE_TRAIL]
+
+    # Diagnose des Aggregators (bitbots_diagnostic), Topic diagnostics_agg: ein DiagnosticArray mit je einem
+    # DiagnosticStatus pro Eintrag. Jeder hat name (Pfad wie "/Robot/Servos/ l_calf_joint"), level
+    # (OK=0, WARN=1, ERROR=2, STALE=3) und message (Kurztext). Gruppen fassen ihre Unterpunkte zusammen.
+    def on_diagnostics(self, msg: DiagnosticArray) -> None:
+        if not msg.status:
+            return
+        servos = {st.name.split("/Servos/", 1)[1].strip(): _motor_status(st) for st in msg.status if "/Servos/" in st.name}
+        self.state.set_servo_status(servos)
+        self._alarm_on_new_failures(msg.status)
+
+    # Alarm, sobald ein Eintrag ERROR oder STALE wird. Nur einzelne Eintraege ohne Unterpunkte, sonst
+    # meldeten auch alle Gruppen darueber dasselbe. Was schon bei der ersten Meldung fehlerhaft ist, loest keinen Alarm aus.
+    def _alarm_on_new_failures(self, statuses: list[DiagnosticStatus]) -> None:
+        groups = {st.name.rsplit("/", 1)[0] for st in statuses}
+        failed = {st.name: st for st in statuses if _level(st) > WARN and st.name not in groups}
+        if self._failed is not None:
+            for name in sorted(failed.keys() - self._failed):
+                st = failed[name]
+                title = "FEHLER" if _level(st) == ERROR else "STALE"
+                self.raise_alarm(title, name.rsplit("/", 1)[-1].strip(), st.message)
+        self._failed = set(failed)
+
+
+# Gierwinkel in Radiant aus einem Quaternion
+def quat_to_yaw(q: Any) -> float:
+    return math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
+
+
+# DiagnosticStatus.level ist in rclpy ein bytes-Objekt der Laenge 1
+def _level(status: DiagnosticStatus) -> int:
+    lv = status.level
+    return lv[0] if isinstance(lv, bytes | bytearray) else int(lv)
+
+
+# (ok, Fehlertext); WARN (z. B. Drehmoment-Ueberlast) zaehlt als laufend
+def _motor_status(status: DiagnosticStatus) -> tuple[bool, str]:
+    ok = _level(status) <= WARN
+    return ok, "" if ok else MOTOR_MESSAGES.get(status.message, status.message.upper()[:11])
+
+
+def main(args: list[str] | None = None) -> None:
+    rclpy.init(args=args)
+    node: DisplayNode | None = None
+    error: str | None = None
+    try:
+        node = DisplayNode()
         rclpy.spin(node)
     except KeyboardInterrupt:
-        node.get_logger().info("Node stopped by user.")
+        pass  # Strg+C oder Demo-Fenster geschlossen
+    except FatalError as e:
+        error = str(e)
     finally:
-        node.destroy_node()
-        rclpy.shutdown()
+        if node is not None:
+            error = error or node.fatal_error
+            node.destroy_node()
+        rclpy.try_shutdown()
+    if error:
+        print(f"[display] FATAL: {error}", file=sys.stderr)
+        sys.exit(1)
