@@ -26,9 +26,10 @@ from rclpy.clock import Clock, ClockType
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
 
+from bitbots_msgs.srv import SetTeachingMode
 from .board import Key, SerialPort, StatusBoardUart
 from .pages import STATUS_PAGES, render_alarm, render_status
-from .state import Pose, RobotState
+from .state import TEACH_MODES, Pose, RobotState, TeachMode
 
 ROLE_NAMES = {0: "?", 1: "PAUSE", 2: "ANDERE", 3: "STURM", 4: "UNTERST.", 5: "ABWEHR", 6: "TOR"}
 ACTION_NAMES = {
@@ -94,7 +95,10 @@ class DisplayNode(Node):
             raise FatalError(f"frame_rate muss groesser als 0 sein, ist {frame_rate}")
 
         self.state = RobotState()
-        self.page = 0
+
+        self.page = 1  # Seite 1 (page_behavior); links davon (Index 0) liegt page_teach
+        self._teach_client = self.create_client(SetTeachingMode, "teaching_mode")
+
         self.alarm: Alarm | None = None
         self.fatal_error: str | None = None  # von Hilfs-Threads gemeldet (Demo-Fenster), main() gibt es aus
         self._failed: set[str] | None = None  # fehlerhafte Diagnosen; None = noch keine Meldung erhalten
@@ -148,8 +152,36 @@ class DisplayNode(Node):
     # key: "up", "down", "left", "right" oder "center"; jede Taste quittiert den Alarm
     def joystick(self, key: Key) -> None:
         self.alarm = None
-        if key in ("left", "right"):
-            self.page = (self.page + (1 if key == "right" else -1)) % len(STATUS_PAGES)
+        on_teach = STATUS_PAGES[self.page] is page_teach
+        match key:
+            case "left" | "right":
+                if on_teach and self.state.teach_mode != TeachMode.OFF:
+                    self._request_teach_mode(TeachMode.OFF)
+                self.page = (self.page + (1 if key == "right" else -1)) % len(STATUS_PAGES)
+            case "center" if on_teach:
+                next_mode = TeachMode.HOLD if self.state.teach_mode == TeachMode.TEACH else TeachMode.TEACH
+                self._request_teach_mode(next_mode)
+
+    def _request_teach_mode(self, mode: TeachMode) -> None:
+        if not self._teach_client.service_is_ready():
+            self.raise_alarm("TEACH", "HCM Service", "nicht bereit", seconds=3)
+            return
+        req = SetTeachingMode.Request()
+        req.state = int(mode)
+        future = self._teach_client.call_async(req)
+        future.add_done_callback(lambda f: self._on_teach_response(mode, f))
+
+    def _on_teach_response(self, requested: TeachMode, future: Any) -> None:
+        try:
+            resp = future.result()
+        except Exception as e:
+            self.raise_alarm("TEACH", "Service Fehler", str(e), seconds=4)
+            return
+        if resp is not None and resp.success:
+            self.state.teach_mode = requested
+        else:
+            # Z.B. wenn POSE direkt aus NONE gewaehlt wurde oder der Roboter nicht CONTROLLABLE ist
+            self.raise_alarm("TEACH", "Wechsel abgelehnt", f"-> {requested.name}", seconds=3)
 
     # Blinkt, bis es quittiert wird oder die Zeit abgelaufen ist
     def raise_alarm(self, title: str, line1: str, line2: str, seconds: float = 30) -> None:

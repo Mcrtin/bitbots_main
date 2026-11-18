@@ -6,10 +6,13 @@
 # Die Seiten lesen nur die oeffentlichen Felder; Standardwerte bedeuten "noch nichts empfangen" (None = unbekannt).
 # Alles laeuft im Executor der Node, daher gibt es weder Threads noch Locks.
 
+
+from enum import IntEnum
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Literal, NamedTuple
+from bitbots_msgs.srv import SetTeachingMode
 
 from . import hardware_interfaces as hw
 
@@ -20,6 +23,11 @@ TORQUE_SAMPLE_S = 0.1  # ein Wert pro Zehntelsekunde fuer den Last-Verlauf
 TORQUE_HISTORY = 60  # 6 s
 
 Group = Literal["left_leg", "right_leg", "arms", "head"]
+
+class TeachMode(IntEnum):
+    NONE = SetTeachingMode.Request.OFF
+    TEACH = SetTeachingMode.Request.TEACH
+    POSE = SetTeachingMode.Request.HOLD
 
 
 @dataclass
@@ -86,6 +94,9 @@ class RobotState:
     loc_percent: int | None = None
     pose: Pose | None = None
     pose_trail: list[tuple[float, float]] = field(default_factory=list)  # letzte Positionen fuer die Feldkarte
+
+    # Teach-Mode
+    teach_mode: TeachMode = TeachMode.NONE
 
     battery: hw.Battery = field(default_factory=hw.Battery)
 

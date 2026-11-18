@@ -7,7 +7,7 @@ from collections.abc import Callable
 
 from PIL import Image, ImageDraw
 
-from .state import Group, Motor, RobotState
+from .state import Group, Motor, RobotState, TeachMode
 from .widgets import (
     BIG,
     NORMAL,
@@ -32,6 +32,12 @@ OVERLOAD_NM = 10.0
 LOAD_SCALE_NM = 15.0
 MAX_IFACES = 4  # Interfaces auf der Netzseite
 GROUP_LABELS: dict[Group, str] = {"left_leg": "L BEIN", "right_leg": "R BEIN", "arms": "ARME", "head": "KOPF"}
+
+TEACH_LABELS: dict[TeachMode, str] = {
+    TeachMode.OFF: "OFF",
+    TeachMode.TEACH: "TEACH",
+    TeachMode.HOLD: "HOLD",
+}
 
 
 # Akkuspannung oder "--.-V", wenn noch keine Nachricht kam
@@ -168,6 +174,13 @@ def page_system(draw: Draw, s: RobotState) -> None:
     text_right(draw, W - 1, 32, _pct(b.percent))
     NORMAL.draw(draw, (0, 44), f"{volt(b.voltage_v)} {_num(b.current_a, '{:.1f}')}A {_num(b.power_w)}W {_num(b.temp_c)}C")
 
+# Seite 0 (links von Seite 1): Teach-Mode per Knopfdruck umschalten
+def page_teach(draw: Draw, s: RobotState) -> None:
+    header(draw, "TEACH", s)
+    text_center(draw, 12, "AKTUELLER MODUS", SMALL)
+    text_center(draw, btn_y + 4, TEACH_LABELS[s.teach_mode], BIG)
+    next_label = "HOLD" if s.teach_mode == TeachMode.TEACH else "TEACH"
+    text_center(draw, 48, f"KLICK: {next_label}", NORMAL)
 
 # ---------------------------------------------------------------- Graph-Seiten
 # Fuers Debugging: Feldkarte, Last je Gelenk, Beinlast
@@ -290,6 +303,7 @@ def page_load_history(draw: Draw, s: RobotState) -> None:
 
 
 STATUS_PAGES: list[Page] = [
+    page_teach,
     page_behavior,
     page_network,
     page_motors,
