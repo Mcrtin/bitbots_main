@@ -1,10 +1,10 @@
-# Alles, was die Seiten (pages.py) anzeigen, in einem Objekt, dazu was sich daraus ableiten laesst.
-#   - display.py (die Node) uebergibt, was sie von anderen Nodes bekommt (set_servo_status, set_joint_torques,
+# Everything the pages (pages.py) show, in one object, plus what can be derived from it.
+#   - display.py (the node) passes on what it receives from other nodes (set_servo_status, set_joint_torques,
 #     game_state_received),
-#   - hardware_interfaces.py liefert die Werte des Rechners und den Akku,
-#   - update() leitet daraus ab, was sich aus Empfangszeiten ergibt (GC verbunden, Motoren, Beinlast).
-# Die Seiten lesen nur die oeffentlichen Felder; Standardwerte bedeuten "noch nichts empfangen" (None = unbekannt).
-# Alles laeuft im Executor der Node, daher gibt es weder Threads noch Locks.
+#   - hardware_interfaces.py provides the computer's values and the battery,
+#   - update() derives what follows from receive times (GC connected, motors, leg load).
+# The pages only read the public fields; default values mean "nothing received yet" (None = unknown).
+# Everything runs in the node's executor, so there are neither threads nor locks.
 
 
 from enum import IntEnum
@@ -16,10 +16,10 @@ from bitbots_msgs.srv import SetTeachingMode
 
 from . import hardware_interfaces as hw
 
-GC_TIMEOUT_S = 3.0  # so lange gilt der Game Controller nach der letzten Nachricht als verbunden
+GC_TIMEOUT_S = 3.0  # the game controller counts as connected for this long after the last message
 JOINT_TIMEOUT_S = 0.5
 HW_POLL_S = 1.0
-TORQUE_SAMPLE_S = 0.1  # ein Wert pro Zehntelsekunde fuer den Last-Verlauf
+TORQUE_SAMPLE_S = 0.1  # one value per tenth of a second for the load history
 TORQUE_HISTORY = 60  # 6 s
 
 Group = Literal["left_leg", "right_leg", "arms", "head"]
@@ -32,26 +32,26 @@ class TeachMode(IntEnum):
 
 @dataclass
 class Motor:
-    id: int  # Position in der Liste, beginnend bei 1
+    id: int  # position in the list, starting at 1
     name: str
     group: Group
     ok: bool = True
-    error: str = ""  # kurzer Fehlertext, wenn nicht ok
-    torque_nm: float | None = None  # Betrag aus joint_states, None = unbekannt
+    error: str = ""  # short error text if not ok
+    torque_nm: float | None = None  # magnitude from joint_states, None = unknown
 
 
-# x [m], y [m], Blickrichtung [Grad]
+# x [m], y [m], heading [degrees]
 class Pose(NamedTuple):
     x: float
     y: float
     theta_deg: int
 
 
-# Beinmotoren in der Reihenfolge von der Huefte zum Fuss. Namen wie in livelybot_serial/config/robot.yaml.
+# Leg motors in order from hip to foot. Names as in livelybot_serial/config/robot.yaml.
 LEG_JOINTS = ["hip_pitch", "hip_roll", "thigh", "calf", "ankle_pitch", "ankle_roll"]
 
 
-# (Seite, Position) eines Beingelenks, sonst None
+# (side, position) of a leg joint, otherwise None
 def _leg_joint(name: str) -> tuple[int, int] | None:
     for side, prefix in enumerate(("l_", "r_")):
         for i, joint in enumerate(LEG_JOINTS):
@@ -67,14 +67,14 @@ def _group(name: str) -> Group:
     return "head" if name.startswith("head") else "arms"
 
 
-# Reihenfolge der Motorliste: erst linkes, dann rechtes Bein von der Huefte zum Fuss,
-# danach alle anderen (Kopf, Arme) alphabetisch
+# Order of the motor list: first left, then right leg from hip to foot,
+# then all others (head, arms) alphabetically
 def _motor_order(name: str) -> tuple[int, int, str]:
     side, i = _leg_joint(name) or (2, 0)
     return side, i, name
 
 
-# 'l_calf_joint' -> 'l-calf' (Anzeigename)
+# 'l_calf_joint' -> 'l-calf' (display name)
 def _short_joint(name: str) -> str:
     return name.replace("_joint", "").replace("_", "-")[:12]
 
@@ -85,27 +85,27 @@ def _round(value: float | None) -> int | None:
 
 @dataclass
 class RobotState:
-    clock: Callable[[], float] = field(default=time.monotonic, repr=False)  # Zeitquelle in Sekunden
+    clock: Callable[[], float] = field(default=time.monotonic, repr=False)  # time source in seconds
     gc_connected: bool = False
 
-    # Verhalten und Lokalisierung
+    # Behaviour and localization
     role: str = "-"
-    action: str = "warte auf Daten"
+    action: str = "waiting for data"
     loc_percent: int | None = None
     pose: Pose | None = None
-    pose_trail: list[tuple[float, float]] = field(default_factory=list)  # letzte Positionen fuer die Feldkarte
+    pose_trail: list[tuple[float, float]] = field(default_factory=list)  # recent positions for the field map
 
-    # Teach-Mode
+    # Teach mode
     teach_mode: TeachMode = TeachMode.NONE
 
     battery: hw.Battery = field(default_factory=hw.Battery)
 
-    # Motoren in Anzeigereihenfolge; Beinlast [Nm]: hoechster Betrag der Beinmotoren, ein Wert pro
-    # Zehntelsekunde, aeltester zuerst
+    # Motors in display order; leg load [Nm]: highest magnitude of the leg motors, one value per
+    # tenth of a second, oldest first
     motors: list[Motor] = field(default_factory=list)
     leg_torque_history: list[float] = field(default_factory=list)
 
-    # Rechner
+    # Computer
     cpu_percent: int | None = None
     cpu_temp_c: int | None = None
     ram_percent: int | None = None
@@ -114,15 +114,15 @@ class RobotState:
 
     def __post_init__(self) -> None:
         self._hardware = hw.Hardware(self.clock)
-        self._servo_status: dict[str, tuple[bool, str]] = {}  # Gelenkname -> (ok, Fehlertext)
-        self._torques: dict[str, float] = {}  # Gelenkname -> Betrag des Drehmoments [Nm]
-        self._game_state_at: float | None = None  # Empfangszeiten
+        self._servo_status: dict[str, tuple[bool, str]] = {}  # joint name -> (ok, error text)
+        self._torques: dict[str, float] = {}  # joint name -> torque magnitude [Nm]
+        self._game_state_at: float | None = None  # receive times
         self._joint_states_at: float | None = None
-        self._leg_peak: float | None = None  # hoechste Bein-Last seit dem letzten Verlaufswert
+        self._leg_peak: float | None = None  # highest leg load since the last history value
         self._last_torque_sample: float | None = None
         self._next_hw_poll = 0.0
 
-    # ------------------------------------------------------------- Seiten-Sicht
+    # ------------------------------------------------------------- View for the pages
 
     @property
     def wlan_ip(self) -> str:
@@ -132,7 +132,7 @@ class RobotState:
     def bad_motors(self) -> list[Motor]:
         return [m for m in self.motors if not m.ok]
 
-    # Motor mit dem groessten bekannten Drehmoment
+    # Motor with the highest known torque
     @property
     def peak_motor(self) -> Motor | None:
         return max((m for m in self.motors if m.torque_nm is not None), key=lambda m: m.torque_nm or 0.0, default=None)
@@ -140,18 +140,18 @@ class RobotState:
     def motors_of(self, *groups: Group) -> list[Motor]:
         return [m for m in self.motors if m.group in groups]
 
-    # ------------------------------------------------------------- Eingaben der Node
+    # ------------------------------------------------------------- Inputs from the node
 
-    # servos: Gelenkname -> (ok, Fehlertext) aus der Diagnose
+    # servos: joint name -> (ok, error text) from the diagnostics
     def set_servo_status(self, servos: dict[str, tuple[bool, str]]) -> None:
         self._servo_status = servos
 
-    # Eine Nachricht des Game Controllers ist angekommen. Der Empfaenger veroeffentlicht gamestate nur fuer
-    # gueltige Pakete, die Nachrichten selbst beweisen also, dass der Game Controller gerade zu hoeren ist.
+    # A game controller message has arrived. The receiver publishes gamestate only for valid packets,
+    # so the messages themselves prove that the game controller can currently be heard.
     def game_state_received(self) -> None:
         self._game_state_at = self.clock()
 
-    # efforts: Gelenkname -> Drehmoment [Nm] aus joint_states
+    # efforts: joint name -> torque [Nm] from joint_states
     def set_joint_torques(self, efforts: dict[str, float]) -> None:
         self._torques = {name: abs(e) for name, e in efforts.items()}
         self._joint_states_at = self.clock()
@@ -159,9 +159,9 @@ class RobotState:
         if legs:
             self._leg_peak = max(legs + [self._leg_peak or 0.0])
 
-    # ------------------------------------------------------------- Ableitungen
+    # ------------------------------------------------------------- Derived values
 
-    # Einmal pro Frame
+    # Once per frame
     def update(self) -> None:
         now = self.clock()
         self.gc_connected = self._fresh(self._game_state_at, GC_TIMEOUT_S)
@@ -171,11 +171,11 @@ class RobotState:
             self._next_hw_poll = now + HW_POLL_S
             self._poll_hardware()
 
-    # Kam die Meldung in den letzten timeout Sekunden?
+    # Did the message arrive within the last timeout seconds?
     def _fresh(self, received_at: float | None, timeout: float) -> bool:
         return received_at is not None and self.clock() - received_at < timeout
 
-    # Motorliste aus Diagnose (Zustand) und joint_states (Drehmoment)
+    # Motor list from diagnostics (state) and joint_states (torque)
     def _build_motors(self, joints_fresh: bool) -> list[Motor]:
         names = sorted(dict.fromkeys([*self._servo_status, *self._torques]), key=_motor_order)
         motors: list[Motor] = []
@@ -183,7 +183,7 @@ class RobotState:
             if name in self._servo_status:
                 ok, error = self._servo_status[name]
             else:
-                ok, error = joints_fresh, "" if joints_fresh else "KEINE DATEN"
+                ok, error = joints_fresh, "" if joints_fresh else "NO DATA"
             torque = self._torques.get(name) if joints_fresh else None
             motors.append(Motor(i + 1, _short_joint(name), _group(name), ok, error, torque))
         return motors

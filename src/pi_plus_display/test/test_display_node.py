@@ -1,4 +1,4 @@
-# Tests fuer die Callbacks der Node (display.py); ohne laufendes ROS, siehe conftest.py
+# Tests for the node's callbacks (display.py); without a running ROS, see conftest.py
 
 import math
 import os
@@ -15,7 +15,7 @@ from pi_plus_display.state import RobotState
 
 @pytest.fixture
 def node():
-    n = object.__new__(display.DisplayNode)  # ohne rclpy-Konstruktor
+    n = object.__new__(display.DisplayNode)  # without the rclpy constructor
     n.state = RobotState()
     n.page, n.alarm, n._failed, n._battery_low = 0, None, None, False
     return n
@@ -29,7 +29,7 @@ def test_quat_to_yaw():
 
 def test_strategy(node):
     node.on_strategy(NS(role=3, action=2))
-    assert node.state.role == "STURM" and node.state.action == "Ball anlaufen"
+    assert node.state.role == "STRIKER" and node.state.action == "Going to ball"
     node.on_strategy(NS(role=99, action=99))
     assert node.state.role == "?" and node.state.action == "-"
 
@@ -60,7 +60,7 @@ def _diag(name, level, message="OK"):
     return NS(name=name, level=bytes([level]), message=message)
 
 
-# Namen wie vom Aggregator (bitbots_diagnostic) und von livelybot_serial
+# Names as from the aggregator (bitbots_diagnostic) and from livelybot_serial
 def test_diagnostics_servos(node):
     node.on_diagnostics(
         NS(
@@ -77,11 +77,11 @@ def test_diagnostics_servos(node):
     )
     node.state.update()
     motors = {m.name: (m.ok, m.error) for m in node.state.motors}
-    assert motors["l-calf"] == (False, "KEINE ANTW.")
+    assert motors["l-calf"] == (False, "NO RESPONSE")
     assert motors["l-hip-pitch"] == (False, "FAULT 0X04")
-    assert motors["l-thigh"] == (True, "")  # WARN zaehlt als laufend
+    assert motors["l-thigh"] == (True, "")  # WARN counts as running
     assert motors["r-hip-pitch"] == (True, "")
-    node.on_diagnostics(NS(status=[]))  # leere Meldung aendert nichts
+    node.on_diagnostics(NS(status=[]))  # an empty message changes nothing
     node.state.update()
     assert len(node.state.motors) == 4
 
@@ -94,7 +94,7 @@ def test_diagnostics_level_may_be_int(node):
 
 def _statuses(**levels):
     return NS(status=[_diag("/Robot", max(levels.values(), default=0))] + [
-        _diag(f"/Robot/{name}", lvl, "kaputt") for name, lvl in levels.items()
+        _diag(f"/Robot/{name}", lvl, "broken") for name, lvl in levels.items()
     ])
 
 
@@ -107,24 +107,24 @@ def test_no_alarm_for_failures_present_at_first_message(node):
 def test_alarm_on_new_error_or_stale_leaf(node):
     node.on_diagnostics(_statuses(Camera=0, Battery=0))
     node.on_diagnostics(_statuses(Camera=2, Battery=0))
-    assert node.alarm[:3] == ("FEHLER", "Camera", "kaputt")
+    assert node.alarm[:3] == ("ERROR", "Camera", "broken")
     node.joystick("center")
-    node.on_diagnostics(_statuses(Camera=2, Battery=3))  # Camera besteht weiter, Battery neu
-    assert node.alarm[:3] == ("STALE", "Battery", "kaputt")
+    node.on_diagnostics(_statuses(Camera=2, Battery=3))  # Camera persists, Battery is new
+    assert node.alarm[:3] == ("STALE", "Battery", "broken")
     node.joystick("center")
     node.on_diagnostics(_statuses(Camera=2, Battery=3))
-    assert node.alarm is None  # nichts Neues
+    assert node.alarm is None  # nothing new
 
 
 def test_warn_and_group_do_not_alarm(node):
     node.on_diagnostics(_statuses(Camera=0))
     node.on_diagnostics(_statuses(Camera=1))  # WARN
     assert node.alarm is None
-    # nur das Blatt meldet, nicht die Gruppe "/Robot/Servos" darueber
+    # only the leaf reports, not the group "/Robot/Servos" above it
     leaf = lambda lvl: NS(status=[_diag("/Robot/Servos", lvl), _diag("/Robot/Servos/ l_calf_joint", lvl, "No CAN data")])  # noqa: E731
     node.on_diagnostics(leaf(0))
     node.on_diagnostics(leaf(2))
-    assert node.alarm[:3] == ("FEHLER", "l_calf_joint", "No CAN data")
+    assert node.alarm[:3] == ("ERROR", "l_calf_joint", "No CAN data")
 
 
 def test_alarm_again_after_recovery(node):
@@ -136,7 +136,7 @@ def test_alarm_again_after_recovery(node):
     assert node.alarm is not None
 
 
-# ------------------------------------------------------------- Joystick, Alarm, Rendern
+# ------------------------------------------------------------- Joystick, alarm, rendering
 
 
 def test_joystick_pages_wrap_and_clear_alarm(node):
@@ -151,9 +151,9 @@ def test_joystick_pages_wrap_and_clear_alarm(node):
 
 def test_render_always_returns_an_image(node, monkeypatch):
     monkeypatch.setattr(display.time, "monotonic", lambda: 0.0)
-    node.raise_alarm("FEHLER", "a" * 40, "b", seconds=1)
-    assert len(node.alarm[1]) == 21  # passt auf eine Zeile
-    for now in (0.0, 0.5, 10.0):  # Alarm an, Alarm aus, abgelaufen
+    node.raise_alarm("ERROR", "a" * 40, "b", seconds=1)
+    assert len(node.alarm[1]) == 21  # fits on one line
+    for now in (0.0, 0.5, 10.0):  # alarm on, alarm off, expired
         monkeypatch.setattr(display.time, "monotonic", lambda now=now: now)
         assert node.render().size == (128, 64)
     assert node.alarm is None
@@ -190,14 +190,14 @@ def test_uart_errors_are_fatal(node):
 
         def read_keys(self):
             if self.fail_on == "read":
-                raise OSError("weg")
+                raise OSError("gone")
             return []
 
         def send_image(self, img):
             if self.fail_on == "write":
-                raise OSError("weg")
+                raise OSError("gone")
 
-    for fail_on, text in (("read", "Lesen"), ("write", "Senden")):
+    for fail_on, text in (("read", "Reading"), ("write", "Sending")):
         node.uart = Broken(fail_on)
         with pytest.raises(display.FatalError, match=text):
             node._on_frame()
@@ -205,29 +205,29 @@ def test_uart_errors_are_fatal(node):
 
 def test_game_state_messages_mean_connected(node):
     node.state.update()
-    assert not node.state.gc_connected  # ohne Game Controller
+    assert not node.state.gc_connected  # without a game controller
     node.on_game_state(NS())
     node.state.update()
     assert node.state.gc_connected
 
 
-# ------------------------------------------------------------- Akku-Alarm
+# ------------------------------------------------------------- Low battery alarm
 
 
 def test_low_battery_alarm_once_and_again_after_recovery(node):
     node.state.battery.percent = None
     node._alarm_on_low_battery()
-    assert node.alarm is None  # unbekannt ist kein Alarm
+    assert node.alarm is None  # unknown is no alarm
     node.state.battery.percent = 11
     node._alarm_on_low_battery()
     assert node.alarm is None
     node.state.battery.percent = 9
     node._alarm_on_low_battery()
-    assert node.alarm[:3] == ("AKKU", "9 %", "bitte laden")
+    assert node.alarm[:3] == ("BATTERY", "9 %", "please charge")
     node.joystick("center")
     node.state.battery.percent = 8
     node._alarm_on_low_battery()
-    assert node.alarm is None  # bleibt niedrig: nur einmal
+    assert node.alarm is None  # stays low: only once
     node.state.battery.percent = 30
     node._alarm_on_low_battery()
     node.state.battery.percent = 5
@@ -238,10 +238,10 @@ def test_low_battery_alarm_once_and_again_after_recovery(node):
 def test_low_battery_at_startup_alarms(node):
     node.state.battery.percent = 4
     node._alarm_on_low_battery()
-    assert node.alarm[:2] == ("AKKU", "4 %")
+    assert node.alarm[:2] == ("BATTERY", "4 %")
 
 
-# ------------------------------------------------------------- Node und Protokoll zusammen
+# ------------------------------------------------------------- Node and protocol together
 
 
 def test_node_and_board_talk_through_the_protocol(node):
@@ -251,39 +251,39 @@ def test_node_and_board_talk_through_the_protocol(node):
     ser = LoopbackSerial()
     node.uart = StatusBoardUart(ser)
     node._on_frame()
-    assert ser.image().tobytes() == node.render().convert("1").tobytes()  # die Platine zeigt, was die Node rendert
-    ser.press("right")  # Taste der Platine -> Tasten-Rahmen -> Seitenwechsel -> neues Bild
+    assert ser.image().tobytes() == node.render().convert("1").tobytes()  # the board shows what the node renders
+    ser.press("right")  # board key -> key frame -> page change -> new image
     node._on_frame()
     assert node.page == 1
     assert ser.image().tobytes() == node.render().convert("1").tobytes()
 
 
-# ------------------------------------------------------------- Fehlerfaelle: lieber beenden als halb arbeiten
+# ------------------------------------------------------------- Error cases: better to exit than to half work
 
 
 def test_open_serial_errors_are_fatal(tmp_path, monkeypatch):
-    with pytest.raises(display.FatalError, match="nicht gesetzt"):
+    with pytest.raises(display.FatalError, match="not set"):
         display.open_serial("", 115200)
-    with pytest.raises(display.FatalError, match="gibt es nicht.*demo:=true"):
+    with pytest.raises(display.FatalError, match="does not exist.*demo:=true"):
         display.open_serial(str(tmp_path / "ttyX"), 115200)
     port = tmp_path / "ttyS"
     port.write_text("")
     port.chmod(0o000)
-    if os.geteuid() != 0:  # als root gibt es keine Rechteprobleme
+    if os.geteuid() != 0:  # as root there are no permission problems
         with pytest.raises(display.FatalError, match="dialout"):
             display.open_serial(str(port), 115200)
     port.chmod(0o600)
 
-    monkeypatch.setitem(sys.modules, "serial", None)  # nicht installiert
+    monkeypatch.setitem(sys.modules, "serial", None)  # not installed
     with pytest.raises(display.FatalError, match="pyserial"):
         display.open_serial(str(port), 115200)
 
     fake = types.ModuleType("serial")
     def boom(*args, **kwargs):
-        raise OSError("Port belegt")
+        raise OSError("port busy")
     fake.Serial = boom
     monkeypatch.setitem(sys.modules, "serial", fake)
-    with pytest.raises(display.FatalError, match="laesst sich nicht.*Port belegt"):
+    with pytest.raises(display.FatalError, match="cannot be opened.*port busy"):
         display.open_serial(str(port), 115200)
 
     opened = []
@@ -311,29 +311,29 @@ class _FakeNode:
 
 def test_main_prints_the_error_and_exits_with_1(monkeypatch, capsys):
     def factory():
-        raise display.FatalError("Port weg")
+        raise display.FatalError("port gone")
 
     code, err = _run_main(monkeypatch, capsys, node_factory=factory, spin=lambda node: None)
-    assert code == 1 and "FATAL: Port weg" in err
+    assert code == 1 and "FATAL: port gone" in err
 
     node = _FakeNode()
 
     def spin(n):
-        raise display.FatalError("UART kaputt")
+        raise display.FatalError("UART broken")
 
     code, err = _run_main(monkeypatch, capsys, node_factory=lambda: node, spin=spin)
-    assert code == 1 and "FATAL: UART kaputt" in err and node.destroyed
+    assert code == 1 and "FATAL: UART broken" in err and node.destroyed
 
 
 def test_main_reports_errors_from_the_demo_window_thread(monkeypatch, capsys):
     node = _FakeNode()
 
     def spin(n):
-        n.fatal_error = "Demo-Fenster: kein Bildschirm"
-        raise KeyboardInterrupt  # so unterbricht das Fenster den Hauptthread
+        n.fatal_error = "Demo window: no screen"
+        raise KeyboardInterrupt  # this is how the window interrupts the main thread
 
     code, err = _run_main(monkeypatch, capsys, node_factory=lambda: node, spin=spin)
-    assert code == 1 and "kein Bildschirm" in err
+    assert code == 1 and "no screen" in err
 
 
 def test_main_exits_quietly_on_ctrl_c(monkeypatch, capsys):
@@ -344,5 +344,5 @@ def test_main_exits_quietly_on_ctrl_c(monkeypatch, capsys):
 
     monkeypatch.setattr(display, "rclpy", types.SimpleNamespace(init=lambda args=None: None, spin=spin, try_shutdown=lambda: None))
     monkeypatch.setattr(display, "DisplayNode", lambda: node)
-    display.main()  # kein SystemExit
+    display.main()  # no SystemExit
     assert capsys.readouterr().err == "" and node.destroyed

@@ -1,5 +1,5 @@
-# display.py importiert rclpy und die ROS-Nachrichtenpakete. Wo die fehlen (Laptop, CI), springen
-# leere Ersatzmodule ein, damit die Callbacks der Node trotzdem getestet werden koennen.
+# display.py imports rclpy and the ROS message packages. Where they are missing (laptop, CI), empty
+# stub modules step in so the node's callbacks can still be tested.
 
 import importlib.util
 import sys

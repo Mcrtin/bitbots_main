@@ -1,12 +1,12 @@
-# Verbindung zur Statusplatine (STM32 mit eigener Firmware, SSD1309-Display) per UART, 8N1.
-# Beide Richtungen haben genau eine Nachricht fester Laenge:
-#   Roboter -> Platine: AA, 1024 Byte Bild im SSD1309-Layout, CRC-8
-#   Platine -> Roboter: AA, Tastencode, CRC-8
-# AA ist die Marke zum Wiederfinden nach einem Fehler; die CRC-8 (ueber alles nach der Marke) prueft den Inhalt.
-# Ein Rahmen wird erst angenommen, wenn die CRC stimmt, sonst wird nur die Marke verworfen und weitergesucht.
-# Das Bild wird bei Aenderung und sonst einmal pro Sekunde gesendet (REFRESH_S), damit die Platine sich nach
-# Stoerungen selbst heilt. Es gibt keine Quittungen. Tastencodes: JOYSTICK_KEYS, gesendet wird nur das Druecken.
-# Die Rahmen sind ein Vorschlag und muessen mit der Firmware abgestimmt werden.
+# Connection to the status board (STM32 with custom firmware, SSD1309 display) over UART, 8N1.
+# Each direction has exactly one message of fixed length:
+#   robot -> board: AA, 1024-byte image in SSD1309 layout, CRC-8
+#   board -> robot: AA, key code, CRC-8
+# AA is the marker for resynchronising after an error; the CRC-8 (over everything after the marker) checks the content.
+# A frame is only accepted if the CRC matches; otherwise only the marker is dropped and the search continues.
+# The image is sent on change and otherwise once per second (REFRESH_S), so the board heals itself after
+# disturbances. There are no acknowledgements. Key codes: JOYSTICK_KEYS; only key presses are sent.
+# The frames are a proposal and must be agreed with the firmware.
 
 import time
 from collections.abc import Callable
@@ -17,16 +17,16 @@ from PIL import Image
 MAGIC = 0xAA
 
 WIDTH, HEIGHT = 128, 64
-PAGES = HEIGHT // 8  # SSD1309 im Page-Modus: 8 Pages a 8 Zeilen
-IMAGE_BYTES = PAGES * WIDTH  # ein Byte je Spalte und Page: 8 senkrechte Pixel, Bit 0 oben
-REFRESH_S = 1.0  # auch ein unveraendertes Bild wird so oft gesendet, damit die Platine nach Stoerungen wieder stimmt
+PAGES = HEIGHT // 8  # SSD1309 in page mode: 8 pages of 8 rows
+IMAGE_BYTES = PAGES * WIDTH  # one byte per column and page: 8 vertical pixels, bit 0 at the top
+REFRESH_S = 1.0  # an unchanged image is also sent this often, so the board is correct again after disturbances
 
 Key = Literal["up", "down", "left", "right", "center"]
 JOYSTICK_KEYS: dict[int, Key] = {0: "up", 1: "down", 2: "left", 3: "right", 4: "center"}
 KEY_CODES = {name: code for code, name in JOYSTICK_KEYS.items()}
 
 
-# PIL-Bild 128x64 -> 1024 Bytes im SSD1309-Layout
+# PIL image 128x64 -> 1024 bytes in SSD1309 layout
 def to_pages(img: Image.Image) -> bytes:
     img = img.convert("1")
     px = img.load()
@@ -42,7 +42,7 @@ def to_pages(img: Image.Image) -> bytes:
     return bytes(out)
 
 
-# 1024 Bytes im SSD1309-Layout -> PIL-Bild 128x64 (Gegenstueck zu to_pages)
+# 1024 bytes in SSD1309 layout -> PIL image 128x64 (counterpart of to_pages)
 def from_pages(data: bytes | bytearray) -> Image.Image:
     img = Image.new("1", (WIDTH, HEIGHT))
     px = img.load()
@@ -64,7 +64,7 @@ def _crc8_step(crc: int) -> int:
 _CRC8_TABLE = [_crc8_step(i) for i in range(256)]
 
 
-# CRC-8 mit Polynom 0x07, Startwert 0, ohne Spiegelung und ohne Abschluss-XOR (CRC-8/SMBUS)
+# CRC-8 with polynomial 0x07, initial value 0, no reflection and no final XOR (CRC-8/SMBUS)
 def crc8(data: bytes | bytearray) -> int:
     crc = 0
     for byte in data:
@@ -86,14 +86,14 @@ def joystick_frame(key: Key) -> bytes:
 
 
 class FrameParser:
-    # Sucht Rahmen AA, payload_len Bytes, CRC-8 in einem Bytestrom. Unvollstaendige Rahmen bleiben im Puffer,
-    # bei falscher CRC wird nur die Marke verworfen und ab dem naechsten Byte weitergesucht.
+    # Finds frames AA, payload_len bytes, CRC-8 in a byte stream. Incomplete frames stay in the buffer;
+    # on a wrong CRC only the marker is dropped and the search continues from the next byte.
 
     def __init__(self, payload_len: int) -> None:
         self._payload_len = payload_len
         self._buf = bytearray()
 
-    # Gibt die Payloads aller vollstaendigen, gueltigen Rahmen zurueck
+    # Returns the payloads of all complete, valid frames
     def feed(self, data: bytes) -> list[bytes]:
         self._buf += data
         size = self._payload_len + 2
@@ -114,7 +114,7 @@ class FrameParser:
                 del self._buf[:1]
 
 
-# Gegenstueck zur Platine: baut aus den Bild-Rahmen das Abbild des Displays nach
+# Counterpart of the board: rebuilds the display contents from the image frames
 class FramebufferReceiver:
     def __init__(self) -> None:
         self._parser = FrameParser(IMAGE_BYTES)
@@ -128,12 +128,12 @@ class FramebufferReceiver:
         return from_pages(self.data)
 
 
-# Tastencodes -> Tastennamen
+# key codes -> key names
 def joystick_events(payloads: list[bytes]) -> list[Key]:
     return [JOYSTICK_KEYS[p[0]] for p in payloads if p[0] in JOYSTICK_KEYS]
 
 
-# Das, was StatusBoardUart vom seriellen Port braucht (pyserial.Serial erfuellt es)
+# What StatusBoardUart needs from the serial port (pyserial.Serial satisfies it)
 class SerialPort(Protocol):
     @property
     def in_waiting(self) -> int: ...
@@ -149,12 +149,12 @@ class StatusBoardUart:
     def __init__(self, ser: SerialPort, clock: Callable[[], float] = time.monotonic) -> None:
         self.ser = ser
         self._clock = clock
-        self._last: bytes | None = None  # zuletzt gesendetes Abbild
+        self._last: bytes | None = None  # last image sent
         self._sent_at = 0.0
         self._keys = FrameParser(1)
 
-    # Schickt das Bild, wenn es sich geaendert hat oder das letzte Senden REFRESH_S her ist; True, wenn gesendet.
-    # Schlaegt das Schreiben fehl, bleibt der alte Stand, das naechste Bild versucht es also erneut.
+    # Sends the image if it has changed or the last send was REFRESH_S ago; True if sent.
+    # If the write fails, the old state is kept, so the next image tries again.
     def send_image(self, img: Image.Image) -> bool:
         data = to_pages(img)
         now = self._clock()

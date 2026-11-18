@@ -7,8 +7,8 @@ package_name = "pi_plus_display"
 setup(
     name=package_name,
     version="0.0.0",
-    # luma/ ist eine eingebundene Kopie von luma.core (Namespace-Paket ohne __init__.py, daher eigens gesucht);
-    # "luma" selbst muss mit in die Liste, sonst verlinkt colcon --symlink-install den Ordner nicht
+    # luma/ is a vendored copy of luma.core (namespace package without __init__.py, hence searched separately);
+    # "luma" itself must be in the list, otherwise colcon --symlink-install does not link the folder
     packages=find_packages(exclude=["test"]) + find_namespace_packages(include=["luma", "luma.*"]),
     data_files=[
         ("share/ament_index/resource_index/packages", ["resource/" + package_name]),

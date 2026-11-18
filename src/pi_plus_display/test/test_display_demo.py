@@ -1,4 +1,4 @@
-# Tests fuer das Demo-Fenster ohne Fenster: LoopbackSerial als Gegenstelle des UART-Protokolls
+# Tests for the demo window without a window: LoopbackSerial as the other end of the UART protocol
 
 from pi_plus_display.board import StatusBoardUart, to_pages
 from pi_plus_display.display_demo import LoopbackSerial
@@ -13,7 +13,7 @@ def test_window_image_comes_through_the_protocol():
     uart.send_image(img)
     shown = ser.image()
     assert to_pages(shown) == to_pages(img)
-    assert ser.image() is shown  # unveraendert: dasselbe Objekt
+    assert ser.image() is shown  # unchanged: the same object
     uart.send_image(render_status(RobotState(), 1))
     assert ser.image() is not shown
 

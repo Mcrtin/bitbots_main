@@ -1,7 +1,7 @@
-# Parameter der Node (display.py)
+# Parameters of the node (display.py)
 /**:
   ros__parameters:
-    demo: false # true = Fenster am Rechner statt der Platine (serial_port wird ignoriert); per Kommandozeile: --ros-args -p demo:=true
-    serial_port: /dev/ttyS4 # muss sich oeffnen lassen, sonst beendet sich die Node
+    demo: false # true = window on the computer instead of the board (serial_port is ignored); from the command line: --ros-args -p demo:=true
+    serial_port: /dev/ttyS4 # must be openable, otherwise the node exits
     baudrate: 115200
     frame_rate: 10.0

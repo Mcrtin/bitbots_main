@@ -1,6 +1,6 @@
-# Die einzelnen Bildschirmseiten. Jede Seite ist eine Funktion (draw, state) -> None und zeichnet
-# auf ein 128x64-Bild im Modus "1". Welche Seiten in welcher Reihenfolge erscheinen, steht in STATUS_PAGES.
-# Bedienung per 5-Wege-Joystick: links/rechts blaettert; jede Taste quittiert einen Alarm.
+# The individual screen pages. Each page is a function (draw, state) -> None and draws
+# onto a 128x64 image in mode "1". Which pages appear in which order is defined in STATUS_PAGES.
+# Controlled with a 5-way joystick: left/right flips pages; any key acknowledges an alarm.
 
 import math
 from collections.abc import Callable
@@ -25,13 +25,13 @@ from .widgets import (
 
 Page = Callable[[Draw, RobotState], None]
 
-# Spielfeld HSL KidSize in Metern (Laenge x Breite), Mittelkreis-Radius
+# HSL KidSize field in metres (length x width), centre circle radius
 FIELD_L, FIELD_W, CIRCLE_R = 9.0, 6.0, 0.75
-# Grenze fuer Drehmoment-Ueberlast in livelybot_serial (diagnostics.torque_overload_threshold)
+# Torque overload limit in livelybot_serial (diagnostics.torque_overload_threshold)
 OVERLOAD_NM = 10.0
 LOAD_SCALE_NM = 15.0
-MAX_IFACES = 4  # Interfaces auf der Netzseite
-GROUP_LABELS: dict[Group, str] = {"left_leg": "L BEIN", "right_leg": "R BEIN", "arms": "ARME", "head": "KOPF"}
+MAX_IFACES = 4  # interfaces on the network page
+GROUP_LABELS: dict[Group, str] = {"left_leg": "L LEG", "right_leg": "R LEG", "arms": "ARMS", "head": "HEAD"}
 
 TEACH_LABELS: dict[TeachMode, str] = {
     TeachMode.OFF: "OFF",
@@ -40,12 +40,12 @@ TEACH_LABELS: dict[TeachMode, str] = {
 }
 
 
-# Akkuspannung oder "--.-V", wenn noch keine Nachricht kam
+# Battery voltage, or "--.-V" if no message has arrived yet
 def volt(v: float | None) -> str:
     return "--.-V" if v is None else f"{v:.1f}V"
 
 
-# Zahl oder "--", wenn der Wert noch unbekannt ist; fmt z. B. "{:.1f} A"
+# Number, or "--" if the value is still unknown; fmt e.g. "{:.1f} A"
 def _num(v: float | None, fmt: str = "{:.0f}") -> str:
     return "--" if v is None else fmt.format(v)
 
@@ -54,13 +54,13 @@ def _pct(v: float | None) -> str:
     return f"{_num(v)}%"
 
 
-# Gestrichelte waagrechte Linie
+# Dashed horizontal line
 def _dashed(draw: Draw, x0: int, x1: int, y: int, fill: int = 1, step: int = 3) -> None:
     for x in range(x0, x1 + 1, step):
         draw.point((x, y), fill=fill)
 
 
-# Verlauf als Flaeche, neuester Wert rechts; lo..hi wird auf die Hoehe top..bottom abgebildet
+# History as a filled area, newest value on the right; lo..hi is mapped to the height top..bottom
 def _area(draw: Draw, values: list[float], x0: int, x1: int, top: int, bottom: int, lo: float, hi: float) -> None:
     span = max(hi - lo, 1e-9)
     for i, v in enumerate(reversed(values)):
@@ -71,7 +71,7 @@ def _area(draw: Draw, values: list[float], x0: int, x1: int, top: int, bottom: i
         draw.line((x, y, x, bottom), fill=1)
 
 
-# Bytes pro Sekunde kurz: 850, 12K, 1.2M
+# Bytes per second, short: 850, 12K, 1.2M
 def _rate(bps: float | None) -> str:
     if bps is None:
         return "--"
@@ -84,43 +84,43 @@ def _rate(bps: float | None) -> str:
     return f"{bps / 1_000_000:.1f}M"
 
 
-# ---------------------------------------------------------------- Statusseiten
+# ---------------------------------------------------------------- Status pages
 
 
-# Seite 1: Rolle und aktuelles Verhalten
+# Page 1: role and current behaviour
 def page_behavior(draw: Draw, s: RobotState) -> None:
     header(draw, "STATUS", s)
-    SMALL.draw(draw, (0, 17), "ROLLE")
+    SMALL.draw(draw, (0, 17), "ROLE")
     BIG.draw(draw, (26, 12), s.role)
-    label_value(draw, 30, "AKT.", s.action)
-    label_value(draw, 40, "GC", "verbunden" if s.gc_connected else "getrennt")
-    SMALL.draw(draw, (0, 51), "LOK.")
+    label_value(draw, 30, "ACT.", s.action)
+    label_value(draw, 40, "GC", "connected" if s.gc_connected else "disconnected")
+    SMALL.draw(draw, (0, 51), "LOC.")
     bar(draw, 26, 50, 70, 7, s.loc_percent)
     text_right(draw, W - 1, 50, _pct(s.loc_percent))
 
 
-# Seite 2: Netzwerk. Die WLAN-IP steht schon in der Kopfzeile, hier Signal und alle Interfaces
+# Page 2: network. The Wi-Fi IP is already in the header; here signal strength and all interfaces
 def page_network(draw: Draw, s: RobotState) -> None:
-    header(draw, "NETZ", s)
-    label_value(draw, 12, "RSSI", f"{s.wifi_rssi} dBm" if s.wifi_rssi is not None else "getrennt")
+    header(draw, "NET", s)
+    label_value(draw, 12, "RSSI", f"{s.wifi_rssi} dBm" if s.wifi_rssi is not None else "disconnected")
 
     if not s.net_ifaces:
-        NORMAL.draw(draw, (0, 24), "keine Interfaces")
+        NORMAL.draw(draw, (0, 24), "no interfaces")
         return
     for i, n in enumerate(s.net_ifaces[:MAX_IFACES]):
         y = 20 + i * 8
         SMALL.draw(draw, (1, y), n.name[:7])
         if not n.up:
-            SMALL.draw(draw, (31, y), "AUS")
+            SMALL.draw(draw, (31, y), "OFF")
             continue
         SMALL.draw(draw, (31, y), n.ip or "-")
         text_right(draw, W - 1, y, f"{_rate(n.rx_bps)} {_rate(n.tx_bps)}", SMALL)
     SMALL.draw(draw, (1, 54), "IF  IPV4")
-    text_right(draw, W - 1, 54, "EMPF SEND B/S", SMALL)
+    text_right(draw, W - 1, 54, "RX TX B/S", SMALL)
 
 
-# Ein Motorkaestchen: ID im Umriss, von unten gefuellt je nach Drehmoment (LOAD_SCALE_NM = voll);
-# die Ziffern werden ueber der Fuellung invertiert. Ausgefallene Motoren sind durchgestrichen
+# One motor box: ID inside the outline, filled from the bottom according to torque (LOAD_SCALE_NM = full);
+# the digits are inverted over the fill. Failed motors are crossed out
 def _motor_cell(draw: Draw, m: Motor, x: int, y: int, w: int, h: int = 10) -> None:
     draw.rectangle((x, y, x + w - 1, y + h - 1), outline=1)
     if not m.ok:
@@ -137,7 +137,7 @@ def _motor_cell(draw: Draw, m: Motor, x: int, y: int, w: int, h: int = 10) -> No
 
 
 def page_motors(draw: Draw, s: RobotState) -> None:
-    header(draw, "MOTOREN", s)
+    header(draw, "MOTORS", s)
     legs: list[tuple[str, Group]] = [("L", "left_leg"), ("R", "right_leg")]
     for row, (side, group) in enumerate(legs):
         y = 12 + row * 12
@@ -149,17 +149,17 @@ def page_motors(draw: Draw, s: RobotState) -> None:
     bad, peak = s.bad_motors, s.peak_motor
     if bad:
         NORMAL.draw(draw, (0, 50), f"{bad[0].id} {bad[0].name}")
-        text_right(draw, W - 1, 51, bad[0].error if len(bad) == 1 else f"+{len(bad) - 1} WEITERE", SMALL)
+        text_right(draw, W - 1, 51, bad[0].error if len(bad) == 1 else f"+{len(bad) - 1} MORE", SMALL)
     elif not s.motors:
-        NORMAL.draw(draw, (0, 50), "keine Motordaten")
+        NORMAL.draw(draw, (0, 50), "no motor data")
     elif peak:
         SMALL.draw(draw, (0, 51), "MAX")
         NORMAL.draw(draw, (18, 50), f"{peak.torque_nm:.1f}Nm {peak.name}")
     else:
-        NORMAL.draw(draw, (0, 50), f"alle {len(s.motors)} Motoren OK")
+        NORMAL.draw(draw, (0, 50), f"all {len(s.motors)} motors OK")
 
 
-# Seite 4: Rechnerlast und Akku
+# Page 4: computer load and battery
 def page_system(draw: Draw, s: RobotState) -> None:
     header(draw, "SYSTEM", s)
     SMALL.draw(draw, (0, 13), "CPU")
@@ -174,22 +174,22 @@ def page_system(draw: Draw, s: RobotState) -> None:
     text_right(draw, W - 1, 32, _pct(b.percent))
     NORMAL.draw(draw, (0, 44), f"{volt(b.voltage_v)} {_num(b.current_a, '{:.1f}')}A {_num(b.power_w)}W {_num(b.temp_c)}C")
 
-# Seite 0 (links von Seite 1): Teach-Mode per Knopfdruck umschalten
+# Page 0 (left of page 1): toggle teach mode with a button press
 def page_teach(draw: Draw, s: RobotState) -> None:
     header(draw, "TEACH", s)
-    text_center(draw, 12, "AKTUELLER MODUS", SMALL)
+    text_center(draw, 12, "CURRENT MODE", SMALL)
     text_center(draw, btn_y + 4, TEACH_LABELS[s.teach_mode], BIG)
     next_label = "HOLD" if s.teach_mode == TeachMode.TEACH else "TEACH"
-    text_center(draw, 48, f"KLICK: {next_label}", NORMAL)
+    text_center(draw, 48, f"CLICK: {next_label}", NORMAL)
 
-# ---------------------------------------------------------------- Graph-Seiten
-# Fuers Debugging: Feldkarte, Last je Gelenk, Beinlast
+# ---------------------------------------------------------------- Graph pages
+# For debugging: field map, load per joint, leg load
 
 
-# Seite FELD: Feldkarte mit Position, Blickrichtung und Spur, rechts die Zahlen
+# FIELD page: field map with position, heading and trail, numbers on the right
 def page_field(draw: Draw, s: RobotState) -> None:
-    header(draw, "FELD", s)
-    ppm = 8  # Pixel pro Meter
+    header(draw, "FIELD", s)
+    ppm = 8  # pixels per metre
     fw, fh = int(FIELD_L * ppm), int(FIELD_W * ppm)
     x0, y0 = 3, 12
     draw.rectangle((x0, y0, x0 + fw, y0 + fh), outline=1)
@@ -198,10 +198,10 @@ def page_field(draw: Draw, s: RobotState) -> None:
     r = int(CIRCLE_R * ppm)
     draw.ellipse((cx - r, cy - r, cx + r, cy + r), outline=1)
     goal = int(2.6 * ppm) // 2
-    draw.line((x0 - 2, cy - goal, x0 - 2, cy + goal), fill=1)  # eigenes Tor links
+    draw.line((x0 - 2, cy - goal, x0 - 2, cy + goal), fill=1)  # own goal on the left
     draw.line(
         (x0 + fw + 2, cy - goal, x0 + fw + 2, cy + goal), fill=1
-    )  # gegnerisches Tor rechts
+    )  # opponent goal on the right
 
     def to_px(x: float, y: float) -> tuple[int, int]:
         return round(cx + x * ppm), round(cy - y * ppm)
@@ -210,7 +210,7 @@ def page_field(draw: Draw, s: RobotState) -> None:
         draw.point(to_px(x, y), fill=1)
     tx = x0 + fw + 5
     if s.pose is None:
-        SMALL.draw(draw, (tx, 14), "KEINE")
+        SMALL.draw(draw, (tx, 14), "NO")
         SMALL.draw(draw, (tx, 21), "POSE")
         return
     x, y, theta = s.pose
@@ -224,20 +224,20 @@ def page_field(draw: Draw, s: RobotState) -> None:
     text_right(draw, W - 1, 12, f"{x:+.1f}")
     SMALL.draw(draw, (tx, 22), "Y")
     text_right(draw, W - 1, 21, f"{y:+.1f}")
-    SMALL.draw(draw, (tx, 31), "W")
+    SMALL.draw(draw, (tx, 31), "YAW")
     text_right(draw, W - 1, 30, f"{theta:+d}")
-    SMALL.draw(draw, (tx, 41), "LOK")
+    SMALL.draw(draw, (tx, 41), "LOC")
     text_right(draw, W - 1, 40, _pct(s.loc_percent))
     bar(draw, tx, 49, W - tx, 6, s.loc_percent)
 
 
-# Seite LAST: Drehmoment aller Motoren als Balken, gestrichelt die Ueberlastgrenze
+# LOAD page: torque of all motors as bars, overload limit dashed
 def page_load(draw: Draw, s: RobotState) -> None:
-    header(draw, "LAST", s)
+    header(draw, "LOAD", s)
     top, bottom = 12, 45
     height = bottom - top
     x = 1
-    groups: list[tuple[Group, int, int]] = []  # Gruppe, x links, x rechts
+    groups: list[tuple[Group, int, int]] = []  # group, x left, x right
     prev: Group | None = None
     for m in s.motors:
         g = m.group
@@ -264,14 +264,14 @@ def page_load(draw: Draw, s: RobotState) -> None:
             SMALL.draw(draw, ((gx0 + gx1 - label_w) // 2, 48), label)
     peak = s.peak_motor
     if not s.motors:
-        SMALL.draw(draw, (1, 54), "KEINE MOTORDATEN")
+        SMALL.draw(draw, (1, 54), "NO MOTOR DATA")
     elif peak:
         SMALL.draw(draw, (1, 54), f"MAX {peak.torque_nm:.1f} NM {peak.name}")
 
 
-# Seite LASTVERLAUF: hoechste Bein-Last der letzten 6 s als Linie, mit Ueberlastgrenze
+# LOAD HISTORY page: highest leg load of the last 6 s as a line, with overload limit
 def page_load_history(draw: Draw, s: RobotState) -> None:
-    header(draw, "BEINLAST", s)
+    header(draw, "LEG LOAD", s)
     x0, x1, top, bottom = 14, W - 1, 12, 50
     height = bottom - top
     SMALL.draw(draw, (0, top), f"{LOAD_SCALE_NM:.0f}")
@@ -285,7 +285,7 @@ def page_load_history(draw: Draw, s: RobotState) -> None:
     draw.line((x0 - 2, bottom, x1, bottom), fill=1)
     _dashed(draw, x0, x1, bottom - round(OVERLOAD_NM / LOAD_SCALE_NM * height))
     hist = s.leg_torque_history
-    step = (x1 - x0) / 59  # 60 Werte = 6 s
+    step = (x1 - x0) / 59  # 60 values = 6 s
     pts = []
     for i, v in enumerate(hist):
         x = x1 - round((len(hist) - 1 - i) * step)
@@ -299,7 +299,7 @@ def page_load_history(draw: Draw, s: RobotState) -> None:
     if hist:
         text_right(draw, W - 1, 53, f"{hist[-1]:.1f} NM", SMALL)
     else:
-        text_right(draw, W - 1, 53, "KEINE DATEN", SMALL)
+        text_right(draw, W - 1, 53, "NO DATA", SMALL)
 
 
 STATUS_PAGES: list[Page] = [
@@ -314,7 +314,7 @@ STATUS_PAGES: list[Page] = [
 ]
 
 
-# Rendert Statusseite index inkl. Seitenpunkten
+# Renders status page index including the page dots
 def render_status(state: RobotState, index: int) -> Image.Image:
     img = Image.new("1", (W, H), 0)
     d = ImageDraw.Draw(img)
@@ -324,9 +324,9 @@ def render_status(state: RobotState, index: int) -> Image.Image:
 
 
 
-# Alarm: ganzer Bildschirm invertiert, damit er aus Entfernung auffaellt.
-# Im Betrieb im Sekundentakt mit der Normalansicht abwechselnd blinken lassen.
-def render_alarm(title: str = "FEHLER", lines: tuple[str, ...] = ("Motor 4  L-Knie", "keine Antwort")) -> Image.Image:
+# Alarm: whole screen inverted so it stands out from a distance.
+# In operation, let it blink alternating with the normal view every second.
+def render_alarm(title: str = "ERROR", lines: tuple[str, ...] = ("Motor 4  L-knee", "no response")) -> Image.Image:
     img = Image.new("1", (W, H), 1)
     d = ImageDraw.Draw(img)
     d.rectangle((2, 2, W - 3, H - 3), outline=0)

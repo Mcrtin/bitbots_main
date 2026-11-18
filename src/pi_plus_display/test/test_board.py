@@ -1,4 +1,4 @@
-# Tests fuer das UART-Protokoll (board.py); laufen ohne Platine
+# Tests for the UART protocol (board.py); run without the board
 
 import random
 
@@ -26,7 +26,7 @@ def _image(page=0, **state):
     return render_status(s, page)
 
 
-# ------------------------------------------------------------- CRC und Rahmen
+# ------------------------------------------------------------- CRC and frames
 
 
 def test_crc8_check_value_and_basics():
@@ -45,7 +45,7 @@ def test_frame_layouts():
 
 def test_pages_bit_layout_and_roundtrip():
     img = _image().point(lambda _: 0)
-    img.putpixel((5, 9), 1)  # Page 1, Bit 1
+    img.putpixel((5, 9), 1)  # page 1, bit 1
     data = to_pages(img)
     assert data[1 * 128 + 5] == 0b10 and sum(data) == 0b10
     full = _image(1)
@@ -59,7 +59,7 @@ def test_parser_split_garbage_and_release_free_stream():
     parser = FrameParser(1)
     stream = b"\x00\x13" + joystick_frame("right") + b"\xaa\x99" + joystick_frame("left") + joystick_frame("center")
     payloads = []
-    for i in range(0, len(stream), 2):  # in kleinen Stuecken wie vom UART
+    for i in range(0, len(stream), 2):  # in small chunks like from the UART
         payloads += parser.feed(stream[i : i + 2])
     assert joystick_events(payloads) == ["right", "left", "center"]
 
@@ -67,9 +67,9 @@ def test_parser_split_garbage_and_release_free_stream():
 def test_parser_rejects_bad_crc_and_resyncs():
     good = joystick_frame("up")
     bad = bytearray(joystick_frame("down"))
-    bad[1] ^= 0x01  # ein Bit im Tastencode
+    bad[1] ^= 0x01  # one bit in the key code
     assert joystick_events(FrameParser(1).feed(bytes(bad) + good)) == ["up"]
-    assert joystick_events(FrameParser(1).feed(bytes([MAGIC]) + good)) == ["up"]  # Marke ohne Rahmen davor
+    assert joystick_events(FrameParser(1).feed(bytes([MAGIC]) + good)) == ["up"]  # marker without a frame before it
 
 
 def test_parser_ignores_unknown_key_codes():
@@ -77,7 +77,7 @@ def test_parser_ignores_unknown_key_codes():
 
 
 def test_pixel_data_containing_the_magic_is_fine():
-    data = bytes([MAGIC]) * IMAGE_BYTES  # jedes Datenbyte sieht wie eine Marke aus
+    data = bytes([MAGIC]) * IMAGE_BYTES  # every data byte looks like a marker
     receiver = FramebufferReceiver()
     receiver.feed(image_frame(data))
     assert receiver.data == data
@@ -86,7 +86,7 @@ def test_pixel_data_containing_the_magic_is_fine():
 def test_every_single_bit_flip_in_an_image_frame_is_detected():
     data = bytes(random.Random(1).randrange(256) for _ in range(IMAGE_BYTES))
     frame = image_frame(data)
-    positions = [*range(1, 40), *range(40, len(frame), 17), len(frame) - 1]  # Marke ausgenommen
+    positions = [*range(1, 40), *range(40, len(frame), 17), len(frame) - 1]  # marker excluded
     for i in positions:
         for bit in range(8):
             broken = bytearray(frame)
@@ -98,7 +98,7 @@ def test_receiver_recovers_after_lost_byte():
     first = bytes(random.Random(2).randrange(256) for _ in range(IMAGE_BYTES))
     second = bytes(random.Random(3).randrange(256) for _ in range(IMAGE_BYTES))
     receiver = FramebufferReceiver()
-    receiver.feed(image_frame(first)[:-5] + image_frame(first)[-4:])  # ein Byte verloren
+    receiver.feed(image_frame(first)[:-5] + image_frame(first)[-4:])  # one byte lost
     assert receiver.data == bytes(IMAGE_BYTES)
     receiver.feed(image_frame(second))
     assert receiver.data == second
@@ -107,7 +107,7 @@ def test_receiver_recovers_after_lost_byte():
 # ------------------------------------------------------------- StatusBoardUart
 
 
-class _Serial:  # Platine, die alles mitliest und Tasten zurueckschickt
+class _Serial:  # board that reads everything and sends keys back
     def __init__(self):
         self.board, self.rx, self.writes = FramebufferReceiver(), bytearray(), 0
 
@@ -134,12 +134,12 @@ def test_uart_sends_changes_at_once_and_unchanged_images_once_per_refresh():
     first, second = _image(0), _image(1)
     assert uart.send_image(first)
     assert ser.board.image().tobytes() == first.convert("1").tobytes()
-    assert not uart.send_image(first)  # unveraendert
+    assert not uart.send_image(first)  # unchanged
     t[0] += REFRESH_S / 2
     assert not uart.send_image(first)
     t[0] += REFRESH_S
-    assert uart.send_image(first)  # Auffrischen
-    assert uart.send_image(second)  # geaendert: sofort
+    assert uart.send_image(first)  # refresh
+    assert uart.send_image(second)  # changed: immediately
     assert ser.board.image().tobytes() == second.convert("1").tobytes()
     assert ser.writes == 3
 
@@ -147,7 +147,7 @@ def test_uart_sends_changes_at_once_and_unchanged_images_once_per_refresh():
 def test_failed_write_is_retried_with_the_next_image():
     class Broken(_Serial):
         def write(self, data):
-            raise OSError("weg")
+            raise OSError("gone")
 
     uart = StatusBoardUart(Broken())
     img = _image()
@@ -156,7 +156,7 @@ def test_failed_write_is_retried_with_the_next_image():
             uart.send_image(img)
         except OSError:
             pass
-    assert uart._last is None  # nichts als gesendet vermerkt
+    assert uart._last is None  # nothing recorded as sent
 
 
 def test_uart_reads_joystick_frames():

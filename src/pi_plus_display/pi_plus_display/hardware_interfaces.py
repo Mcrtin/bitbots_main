@@ -1,6 +1,6 @@
-# Werte des Rechners, auf dem die Anzeige laeuft, aus /proc und /sys.
-# Nichts blockiert: CPU-Last und Netzraten kommen aus der Differenz zum vorigen Aufruf.
-# Ohne /proc (z. B. auf dem Mac) bleiben die Werte None bzw. leer.
+# Values of the computer the display runs on, from /proc and /sys.
+# Nothing blocks: CPU load and network rates come from the difference to the previous call.
+# Without /proc (e.g. on a Mac) the values stay None or empty.
 
 import fcntl
 import socket
@@ -14,22 +14,22 @@ SYS = Path("/sys")
 PROC = Path("/proc")
 
 
-# Netzwerk-Interface mit Datenrate
+# Network interface with data rate
 @dataclass
 class NetIface:
     name: str
     up: bool = True
-    ip: str | None = None  # None = keine IPv4-Adresse (z. B. can0)
-    rx_bps: float | None = None  # Bytes pro Sekunde; None = erst ein Messwert
+    ip: str | None = None  # None = no IPv4 address (e.g. can0)
+    rx_bps: float | None = None  # bytes per second; None = only one sample so far
     tx_bps: float | None = None
 
 
-# Akku aus sysfs; None = der Akku meldet den Wert nicht
+# Battery from sysfs; None = the battery does not report the value
 @dataclass
 class Battery:
     voltage_v: float | None = None
     percent: int | None = None
-    current_a: float | None = None  # Betrag, die Richtung ist egal
+    current_a: float | None = None  # magnitude, direction does not matter
     temp_c: float | None = None
 
     @property
@@ -62,9 +62,9 @@ def _read_text(path: Path) -> str:
         return ""
 
 
-# Alle Temperatursensoren als (Name, Grad Celsius): Thermal-Zonen unter ihrem Typ, hwmon-Chips mit Chipname und
-# Bezeichnung des Messpunkts. Viele PCs haben die CPU nur unter hwmon (AMD: k10temp), waehrend die Thermal-Zonen
-# nur ACPI-Fuehler enthalten, die kaum die CPU messen.
+# All temperature sensors as (name, degrees Celsius): thermal zones under their type, hwmon chips with chip name and
+# label of the measuring point. Many PCs have the CPU only under hwmon (AMD: k10temp), while the thermal zones
+# only contain ACPI sensors that barely measure the CPU.
 def _temperature_sensors() -> list[tuple[str, float]]:
     sensors: list[tuple[str, float]] = []
     for zone in sorted((SYS / "class/thermal").glob("thermal_zone*")):
@@ -78,19 +78,19 @@ def _temperature_sensors() -> list[tuple[str, float]]:
     return sensors
 
 
-# Teile von Sensornamen (klein geschrieben), die zur CPU gehoeren: Intel (coretemp, x86_pkg_temp), AMD (k10temp,
-# zenpower, Tctl/Tdie), ARM-Boards (cpu-thermal, soc-thermal, ...)
+# Parts of sensor names (lowercase) that belong to the CPU: Intel (coretemp, x86_pkg_temp), AMD (k10temp,
+# zenpower, Tctl/Tdie), ARM boards (cpu-thermal, soc-thermal, ...)
 CPU_SENSORS = ("coretemp", "x86_pkg_temp", "k10temp", "zenpower", "tctl", "tdie", "package", "cpu", "soc")
 
 
-# Heisseste CPU-Temperatur in Grad Celsius; None, wenn kein Sensor nach CPU aussieht (lieber nichts anzeigen als
-# den Fuehler einer Grafikkarte oder SSD). Unsinnige Werte (<= 0 oder >= 150 Grad) zaehlen nicht.
+# Hottest CPU temperature in degrees Celsius; None if no sensor looks like a CPU (better to show nothing than
+# the sensor of a graphics card or SSD). Nonsensical values (<= 0 or >= 150 degrees) do not count.
 def cpu_temperature() -> float | None:
     temps = [t for name, t in _temperature_sensors() if any(k in name.lower() for k in CPU_SENSORS) and 0 < t < 150]
     return max(temps) if temps else None
 
 
-# WLAN-Signal in dBm aus /proc/net/wireless
+# Wi-Fi signal in dBm from /proc/net/wireless
 def wifi_rssi() -> int | None:
     try:
         for line in (PROC / "net/wireless").read_text().splitlines()[2:]:
@@ -100,7 +100,7 @@ def wifi_rssi() -> int | None:
     return None
 
 
-# Erster Akku unter /sys/class/power_supply; ohne Akku sind alle Werte None
+# First battery under /sys/class/power_supply; without a battery all values are None
 def battery() -> Battery:
     for supply in sorted((SYS / "class/power_supply").glob("*")):
         try:
@@ -110,15 +110,15 @@ def battery() -> Battery:
             continue
         volt, amp, temp = (_read_int(supply / n) for n in ("voltage_now", "current_now", "temp"))
         return Battery(
-            voltage_v=None if volt is None else volt / 1e6,  # sysfs: Mikrovolt
+            voltage_v=None if volt is None else volt / 1e6,  # sysfs: microvolts
             percent=_read_int(supply / "capacity"),
-            current_a=None if amp is None else abs(amp) / 1e6,  # Mikroampere
-            temp_c=None if temp is None else temp / 10,  # Zehntelgrad
+            current_a=None if amp is None else abs(amp) / 1e6,  # microamperes
+            temp_c=None if temp is None else temp / 10,  # tenths of a degree
         )
     return Battery()
 
 
-# IPv4-Adresse je Interface, falls vorhanden
+# IPv4 address per interface, if any
 def ipv4_addresses() -> dict[str, str]:
     result: dict[str, str] = {}
     try:
@@ -131,18 +131,18 @@ def ipv4_addresses() -> dict[str, str]:
                 response = fcntl.ioctl(sock.fileno(), 0x8915, struct.pack("256s", name.encode()[:15]))
                 result[name] = socket.inet_ntoa(response[20:24])
             except OSError:
-                continue  # keine IPv4-Adresse oder Interface verschwunden
+                continue  # no IPv4 address or interface disappeared
     return result
 
 
 class Hardware:
-    # clock: Zeitquelle in Sekunden fuer die Netzraten
+    # clock: time source in seconds for the network rates
     def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
         self._clock = clock
-        self._cpu: list[int] | None = None  # letzte Zaehler aus /proc/stat
-        self._net: dict[str, tuple[float, int, int]] = {}  # Interface -> (Zeit, rx_bytes, tx_bytes)
+        self._cpu: list[int] | None = None  # last counters from /proc/stat
+        self._net: dict[str, tuple[float, int, int]] = {}  # interface -> (time, rx_bytes, tx_bytes)
 
-    # CPU-Last seit dem vorigen Aufruf in Prozent; beim ersten Aufruf None
+    # CPU load since the previous call in percent; None on the first call
     def cpu_percent(self) -> float | None:
         try:
             fields = (PROC / "stat").read_text().splitlines()[0].split()
@@ -157,7 +157,7 @@ class Hardware:
         idle = delta[3] + delta[4]
         return 100 * (total - idle) / total if total > 0 else None
 
-    # Interfaces ohne lo und veth, aktive zuerst
+    # Interfaces without lo and veth, active ones first
     def net_ifaces(self) -> list[NetIface]:
         try:
             names = sorted(p.name for p in (SYS / "class/net").iterdir())
@@ -179,7 +179,7 @@ class Hardware:
                     rx_bps, tx_bps = max(0.0, (rx - prev[1]) / dt), max(0.0, (tx - prev[2]) / dt)
                 self._net[name] = (now, rx, tx)
             try:
-                # "unknown" melden Interfaces ohne Link-Erkennung, die trotzdem laufen
+                # "unknown" is reported by interfaces without link detection that are running anyway
                 up = (base / "operstate").read_text().strip() in ("up", "unknown")
             except OSError:
                 up = False
